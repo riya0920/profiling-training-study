@@ -10,14 +10,14 @@ from `results/ladder_*.json`; nothing is hand-typed.
 | device | `cpu` (Intel64 Family 6 Model 126 Stepping 5, GenuineIntel) |
 | torch | 2.11.0+cpu |
 | timer | `perf_counter` |
-| steps per run | 30 (after warmup, which is excluded) |
+| steps per run | 25 (after warmup, which is excluded) |
 | repeats per rung | 3, reported as mean ± std |
 | synthetic per-sample decode cost | 400 |
 
 ## Baseline profile: the measurement that set the rung order
 
-The instrumented FP32 baseline runs at **89.0 samples/s** with
-**38% of step time in data wait**. That single number decides
+The instrumented FP32 baseline runs at **75.2 samples/s** with
+**37% of step time in data wait**. That single number decides
 everything that follows: while the compute device is idle a third of the time
 waiting for input, no kernel-level optimisation can help, because the kernels are
 not the constraint. The ladder therefore attacks the dataloader first and only
@@ -31,15 +31,15 @@ so before any time is spent on it.
 
 | rung | samples/s (mean ± std) | Δ vs prev | cumulative | data % | fwd % | bwd % | opt % | note |
 |---|---|---|---|---|---|---|---|---|
-| baseline | 89.0 ± 6.5 | — | 1.00x | 38 | 25 | 36 | 0 | instrumented FP32 reference, single-process loading |
-| workers | 144.0 ± 6.3 | +62% | 1.62x | 0 | 42 | 57 | 0 | attack the profiled data-wait stall |
-| workers+persistent | 131.4 ± 12.7 | -9% | 1.48x | 0 | 44 | 56 | 0 | stop paying worker startup every epoch |
-| +prefetch | 146.9 ± 8.1 | +12% | 1.65x | 0 | 42 | 58 | 0 | deeper queue to absorb jitter in per-sample cost |
+| baseline | 75.2 ± 17.2 | — | 1.00x | 37 | 26 | 36 | 1 | instrumented FP32 reference, single-process loading |
+| workers | 116.3 ± 18.1 | +55% | 1.55x | 0 | 44 | 55 | 1 | attack the profiled data-wait stall |
+| workers+persistent | 144.5 ± 5.6 | +24% | 1.92x | 0 | 42 | 58 | 0 | stop paying worker startup every epoch |
+| +prefetch | 143.7 ± 1.1 | -1% | 1.91x | 0 | 42 | 57 | 0 | deeper queue to absorb jitter in per-sample cost |
 | +pin_memory | _skipped_ | — | — | — | — | — | — | CUDA-only rung; no effect on cpu |
 | +tf32 | _skipped_ | — | — | — | — | — | — | CUDA-only rung; no effect on cpu |
-| +amp | 50.8 ± 2.2 | -65% | 0.57x | 0 | 35 | 65 | 0 | mixed precision; bf16 chosen over fp16, see REPORT |
-| +channels_last | 59.4 ± 3.3 | +17% | 0.67x | 1 | 32 | 67 | 0 | NHWC layout for conv kernels |
-| +batch128 | 60.0 ± 3.1 | +1% | 0.67x | 0 | 32 | 67 | 0 | batch doubled WITH the pre-declared linear LR rule + warmup |
+| +amp | 58.9 ± 4.6 | -59% | 0.78x | 0 | 34 | 65 | 0 | mixed precision; bf16 chosen over fp16, see REPORT |
+| +channels_last | 64.9 ± 3.6 | +10% | 0.86x | 0 | 32 | 68 | 0 | NHWC layout for conv kernels |
+| +batch128 | 61.4 ± 6.6 | -5% | 0.82x | 0 | 31 | 68 | 0 | batch doubled WITH the pre-declared linear LR rule + warmup |
 | +compile | _failed_ | — | — | — | — | — | — | InductorError |
 
 ![ladder_throughput.png](results/figures/ladder_throughput.png)
@@ -47,14 +47,14 @@ so before any time is spent on it.
 
 ## Best configuration
 
-`+prefetch` at **146.9 samples/s**, a **1.65x** cumulative
+`workers+persistent` at **144.5 samples/s**, a **1.92x** cumulative
 speedup over the instrumented baseline.
 
 ## What is and is not separable
 
-* `workers` -> `workers+persistent`: gap 12.6 samples/s is smaller than the combined spread 19.0. **Not separable at this sample size.**
-* `workers+persistent` -> `+prefetch`: gap 15.5 samples/s is smaller than the combined spread 20.9. **Not separable at this sample size.**
-* `+channels_last` -> `+batch128`: gap 0.6 samples/s is smaller than the combined spread 6.3. **Not separable at this sample size.**
+* `workers+persistent` -> `+prefetch`: gap 0.8 samples/s is smaller than the combined spread 6.7. **Not separable at this sample size.**
+* `+amp` -> `+channels_last`: gap 6.1 samples/s is smaller than the combined spread 8.2. **Not separable at this sample size.**
+* `+channels_last` -> `+batch128`: gap 3.5 samples/s is smaller than the combined spread 10.2. **Not separable at this sample size.**
 
 ## Negative results (kept)
 
