@@ -1,0 +1,274 @@
+"""DDP weak-scaling study, actually executed.
+
+    python -m trainlab.scaling --world-sizes 1 2 4 --steps 40
+
+This machine has no GPU, so the study runs **DDP over the gloo backend across
+real OS processes on CPU**. That is a genuine distributed data-parallel run --
+separate processes, real gradient all-reduce, real synchronisation -- and it is
+labelled as CPU/gloo everywhere rather than dressed up as a GPU result.
+
+**What transfers from a CPU/gloo scaling curve and what does not:**
+
+* Transfers: the *method* (weak scaling, fixed per-worker batch, pre-declared LR
+  rule, N independent measurement windows), and the shape of the story -- that
+  efficiency falls as communication's share of step time rises.
+* Does NOT transfer: the numbers. gloo over loopback has completely different
+  bandwidth and latency from NCCL over NVLink, and CPU workers contend for the
+  same cores that the all-reduce runs on. A 4-worker CPU efficiency figure says
+  nothing about 4-GPU efficiency.
+
+The protocol is fixed BEFORE any run, so the result cannot be a hyperparameter
+search wearing a scaling study's clothes:
+
+* **Weak scaling**: per-worker batch is held constant, so the global batch grows
+  with world size. Strong scaling (fixed global batch) is a different experiment
+  with a different answer, and conflating them is the most common error here.
+* **LR rule**: linear in the global batch (Goyal et al.), declared in workload.py.
+* **Warmup**: 5% of steps, excluded from measurement.
+* **Windows**: 3 non-overlapping windows after warmup, reported mean +/- std.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import statistics
+import subprocess
+import sys
+import time
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+RESULTS = os.path.join(ROOT, "results")
+
+
+def _worker_main():
+    """Runs inside each spawned process."""
+    import torch
+    import torch.distributed as dist
+    import torch.nn as nn
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    from torch.utils.data import DataLoader
+    from torch.utils.data.distributed import DistributedSampler
+
+    from .workload import SmallCNN, SyntheticImages, scaled_lr, warmup_steps
+
+    rank = int(os.environ["RANK"])
+    world = int(os.environ["WORLD_SIZE"])
+    steps = int(os.environ["STEPS"])
+    batch = int(os.environ["PER_WORKER_BATCH"])
+    decode_cost = int(os.environ["DECODE_COST"])
+    dataset_n = int(os.environ["DATASET_N"])
+    base_lr = float(os.environ["BASE_LR"])
+
+    # gloo: the CPU collective backend. nccl is GPU-only.
+    if world > 1:
+        dist.init_process_group(backend="gloo", init_method="env://", rank=rank, world_size=world)
+
+    # Each worker gets ONE intra-op thread. Without this, torch spreads a single
+    # worker across all cores and a 4-worker run would be compared against a
+    # 1-worker run that was already using the whole machine -- which would make
+    # "scaling efficiency" measure thread contention rather than communication.
+    torch.set_num_threads(1)
+    torch.manual_seed(0)
+
+    device = torch.device("cpu")
+    ds = SyntheticImages(n=dataset_n, decode_cost=decode_cost)
+    sampler = DistributedSampler(ds, num_replicas=world, rank=rank, shuffle=True) if world > 1 else None
+    loader = DataLoader(ds, batch_size=batch, sampler=sampler, shuffle=sampler is None,
+                        num_workers=0, drop_last=True)
+
+    model = SmallCNN().to(device)
+    if world > 1:
+        model = DDP(model)
+
+    global_batch = batch * world
+    lr = scaled_lr(base_lr, batch, global_batch)
+    opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+    warm = warmup_steps(steps)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warm))
+    loss_fn = nn.CrossEntropyLoss()
+
+    n_warmup = 5
+    per_window = max((steps) // 3, 1)
+    windows, seen, t0 = [], 0, None
+
+    it = iter(loader)
+    for step in range(steps + n_warmup):
+        try:
+            x, y = next(it)
+        except StopIteration:
+            it = iter(loader)
+            x, y = next(it)
+        loss = loss_fn(model(x), y)
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+        sched.step()
+
+        if step == n_warmup - 1:
+            if world > 1:
+                dist.barrier()      # start every worker's clock together
+            t0, seen = time.perf_counter(), 0
+        elif step >= n_warmup:
+            seen += x.shape[0]
+            if (step - n_warmup + 1) % per_window == 0:
+                elapsed = time.perf_counter() - t0
+                windows.append(seen / elapsed)     # per-worker samples/sec
+                t0, seen = time.perf_counter(), 0
+
+    # Communication fraction: time a backward WITH gradient sync against the same
+    # backward inside no_sync(), which skips the all-reduce. The difference is
+    # the non-overlapped communication cost, and it is what explains a scaling
+    # gap instead of hand-waving at one.
+    comm_fraction = 0.0
+    if world > 1:
+        import torch as _t
+
+        x = _t.randn(batch, 3, 32, 32)
+        y = _t.randint(0, 10, (batch,))
+
+        def _time(sync: bool, reps: int = 8) -> float:
+            t = time.perf_counter()
+            for _ in range(reps):
+                if sync:
+                    loss_fn(model(x), y).backward()
+                else:
+                    with model.no_sync():
+                        loss_fn(model(x), y).backward()
+            return time.perf_counter() - t
+
+        _time(True, 3)
+        with_sync, without_sync = _time(True), _time(False)
+        comm_fraction = max(with_sync - without_sync, 0.0) / with_sync if with_sync else 0.0
+
+    result = {
+        "rank": rank,
+        "world_size": world,
+        "per_worker_samples_per_s": windows,
+        "comm_fraction": comm_fraction,
+        "lr": lr,
+        "global_batch": global_batch,
+    }
+    out_dir = os.environ["OUT_DIR"]
+    with open(os.path.join(out_dir, "rank-%d.json" % rank), "w") as fh:
+        json.dump(result, fh)
+
+    if world > 1:
+        dist.destroy_process_group()
+
+
+def run_world_size(world: int, steps: int, batch: int, decode_cost: int, dataset_n: int,
+                   base_lr: float, port: int) -> dict:
+    out_dir = os.path.join(RESULTS, "scaling_ws%d" % world)
+    os.makedirs(out_dir, exist_ok=True)
+    for f in os.listdir(out_dir):
+        os.remove(os.path.join(out_dir, f))
+
+    env = dict(os.environ)
+    env.update({
+        "WORLD_SIZE": str(world), "STEPS": str(steps), "PER_WORKER_BATCH": str(batch),
+        "DECODE_COST": str(decode_cost), "DATASET_N": str(dataset_n), "BASE_LR": str(base_lr),
+        "OUT_DIR": out_dir, "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": str(port),
+        "TRAINLAB_DDP_WORKER": "1",
+        "OMP_NUM_THREADS": "1",
+    })
+
+    procs = []
+    t0 = time.perf_counter()
+    for rank in range(world):
+        e = dict(env)
+        e["RANK"] = str(rank)
+        procs.append(subprocess.Popen([sys.executable, "-m", "trainlab.scaling"], env=e,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+    outs = [p.communicate() for p in procs]
+    wall = time.perf_counter() - t0
+
+    for (o, e), p in zip(outs, procs):
+        if p.returncode != 0:
+            raise RuntimeError("rank failed (%d): %s" % (p.returncode, e.decode()[-600:]))
+
+    ranks = []
+    for rank in range(world):
+        with open(os.path.join(out_dir, "rank-%d.json" % rank)) as fh:
+            ranks.append(json.load(fh))
+
+    # Aggregate throughput = sum over workers of their per-worker rate.
+    per_window_totals = []
+    n_windows = min(len(r["per_worker_samples_per_s"]) for r in ranks)
+    for w in range(n_windows):
+        per_window_totals.append(sum(r["per_worker_samples_per_s"][w] for r in ranks))
+
+    return {
+        "world_size": world,
+        "per_worker_batch": batch,
+        "global_batch": ranks[0]["global_batch"],
+        "lr": ranks[0]["lr"],
+        "windows": per_window_totals,
+        "aggregate_samples_per_s": statistics.fmean(per_window_totals),
+        "std": statistics.stdev(per_window_totals) if len(per_window_totals) > 1 else 0.0,
+        "comm_fraction": statistics.fmean([r["comm_fraction"] for r in ranks]),
+        "wall_s": wall,
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--world-sizes", type=int, nargs="+", default=[1, 2, 4])
+    ap.add_argument("--steps", type=int, default=40)
+    ap.add_argument("--batch", type=int, default=32, help="PER WORKER batch (weak scaling)")
+    ap.add_argument("--decode-cost", type=int, default=60)
+    ap.add_argument("--dataset-n", type=int, default=4000)
+    ap.add_argument("--base-lr", type=float, default=0.01)
+    ap.add_argument("--port", type=int, default=29517)
+    args = ap.parse_args()
+
+    rows = []
+    for i, world in enumerate(args.world_sizes):
+        print("running world_size=%d ..." % world)
+        row = run_world_size(world, args.steps, args.batch, args.decode_cost, args.dataset_n,
+                             args.base_lr, args.port + i)
+        rows.append(row)
+        print("  aggregate %.1f +/- %.1f samples/s   comm_fraction=%.3f"
+              % (row["aggregate_samples_per_s"], row["std"], row["comm_fraction"]))
+
+    base = rows[0]["aggregate_samples_per_s"]
+    base_world = rows[0]["world_size"]
+    for row in rows:
+        ideal = base * (row["world_size"] / base_world)
+        row["speedup"] = row["aggregate_samples_per_s"] / base
+        row["ideal_speedup"] = row["world_size"] / base_world
+        row["efficiency"] = row["speedup"] / row["ideal_speedup"]
+
+    report = {
+        "scaling": "weak (per-worker batch fixed, global batch grows)",
+        "backend": "gloo",
+        "device": "cpu",
+        "hardware": {"platform": platform.platform(),
+                     "processor": platform.processor() or platform.machine(),
+                     "cpu_count": os.cpu_count()},
+        "steps_per_run": args.steps,
+        "threads_per_worker": 1,
+        "rows": rows,
+    }
+    os.makedirs(RESULTS, exist_ok=True)
+    path = os.path.join(RESULTS, "scaling_cpu_gloo.json")
+    with open(path, "w") as fh:
+        json.dump(report, fh, indent=2)
+
+    print()
+    print("| world | global batch | lr | samples/s (mean ± std) | speedup | ideal | efficiency | comm fraction |")
+    print("|---|---|---|---|---|---|---|---|")
+    for r in rows:
+        print("| %d | %d | %.4f | %.1f ± %.1f | %.2fx | %.2fx | %.0f%% | %.1f%% |"
+              % (r["world_size"], r["global_batch"], r["lr"], r["aggregate_samples_per_s"],
+                 r["std"], r["speedup"], r["ideal_speedup"], 100 * r["efficiency"],
+                 100 * r["comm_fraction"]))
+    print("\nwrote", path)
+
+
+if __name__ == "__main__":
+    if os.environ.get("TRAINLAB_DDP_WORKER") == "1":
+        _worker_main()
+    else:
+        main()
