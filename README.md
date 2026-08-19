@@ -4,10 +4,55 @@ An instrumented baseline, then an optimisation ladder where every rung changes
 exactly one thing and the order is chosen by the profile rather than by a blog
 post. Negative results stay in the table.
 
-> **Status: ~40% built.** The instrumentation, the ladder, the repeat-and-report
-> machinery and the generated REPORT.md are done and **measured on CPU**. The DDP
-> harness is written but **has not been run on multiple GPUs**, so this repo
-> contains **no scaling-efficiency number**. See [Roadmap](#roadmap).
+> **Status: ~65% built.** Instrumentation, the ladder, repeats-and-report,
+> committed profiler traces, and a **DDP weak-scaling study executed across real
+> processes** are done — all on **CPU**, and labelled as such everywhere. No GPU
+> exists on this machine, so there is no GPU number anywhere. See
+> [Roadmap](#roadmap).
+
+## DDP weak-scaling, actually executed
+
+No GPU on this machine, so the study runs DDP over the **gloo** backend across
+real OS processes on CPU. Genuinely distributed — separate processes, real
+gradient all-reduce, real barriers — and labelled CPU/gloo everywhere rather than
+dressed up as a GPU result.
+
+| world | global batch | lr | samples/s (mean ± std) | speedup | ideal | efficiency | comm fraction |
+|---|---|---|---|---|---|---|---|
+| 1 | 32 | 0.0100 | 48.1 ± 1.9 | 1.00x | 1.00x | **100%** | 0.0% |
+| 2 | 64 | 0.0200 | 69.4 ± 4.5 | 1.44x | 2.00x | **72%** | 1.7% |
+| 4 | 128 | 0.0400 | 97.3 ± 12.7 | 2.02x | 4.00x | **51%** | 16.7% |
+
+**The comm fraction is measured, not inferred**: a backward pass with gradient
+sync is timed against the identical backward inside `model.no_sync()`, which
+skips the all-reduce. The difference is non-overlapped communication.
+
+**Where the missing 49% went at 4 workers** — 16.7% is measured communication;
+the larger remaining term is core contention, because 4 training processes plus
+their in-process decode plus gloo's collective threads oversubscribe 8 logical
+(4 physical) cores. [docs/SCALING.md](docs/SCALING.md) names the one experiment
+that would separate the two causes, rather than asserting a split it has not
+measured.
+
+**One protocol detail that decides the whole result**: every worker is pinned to
+a single intra-op thread. Without that, the 1-worker baseline already uses every
+core and "scaling efficiency" would be measuring thread contention instead of
+communication.
+
+## Committed profiler traces
+
+`python -m trainlab.profile_trace` writes Chrome traces to `results/traces/`,
+loadable in `chrome://tracing` or Perfetto. A screenshot is a claim about a
+trace; the trace is the evidence, so the trace is what is committed.
+
+| config | data_wait | forward | backward | optimizer |
+|---|---|---|---|---|
+| baseline | **25.2%** | 33.2% | 38.7% | 2.9% |
+| +prefetch | **0.4%** | 47.7% | 48.3% | 3.6% |
+
+Data-wait collapses from a quarter of step time to essentially nothing, which is
+the entire argument for attacking the dataloader before touching precision or
+layout.
 
 ## The one rule
 
@@ -102,12 +147,15 @@ prices are not what anyone's bill actually says.
 | Generated REPORT.md with generated figures | done |
 | Negative + skipped + failed rungs kept in the ledger | done |
 | Cost ledger and scaling break-even calculator | done |
-| DDP harness (weak scaling, comm-fraction measurement) | **written, never run** |
-| **Scaling efficiency at 1/2/4 GPUs on the same GPU model** | not measured |
-| **Measured explanation of the scaling gap (comm fraction)** | not measured |
-| **`torch.compile` rung** | fails on this box: no MSVC toolchain (recorded in the ledger) |
-| **Committed profiler trace + before/after trace screenshots** | not done |
-| **Cost-to-target-accuracy table (1-GPU-optimised vs 4-GPU)** | needs the GPU runs |
+| DDP weak-scaling executed at 1/2/4 workers (CPU/gloo) | done |
+| Measured comm fraction explaining the efficiency gap | done |
+| Committed profiler traces, before/after data-wait | done |
+| `docs/SCALING.md` incl. "when is DDP the wrong tool" | done |
+| **Same study on real GPUs with NCCL** | impossible here: no GPU |
+| **Contention-vs-communication ablation (decode_cost=0 at world 4)** | named, not run |
+| **`torch.compile` rung** | fails on this box: no MSVC toolchain (in the ledger) |
+| **Cost-to-target-ACCURACY table (this study measures throughput only)** | not done |
+| **Strong-scaling counterpart (fixed global batch)** | not done |
 
 ## Honesty notes
 

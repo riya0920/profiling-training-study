@@ -103,3 +103,52 @@ def test_model_forward_shape():
     m = SmallCNN(n_classes=10, width=8)
     out = m(torch.randn(4, 3, 32, 32))
     assert out.shape == (4, 10)
+
+
+def test_scaling_protocol_is_weak_and_lr_follows_global_batch():
+    """The two decisions that make a scaling table meaningful, asserted."""
+    from trainlab.workload import scaled_lr
+
+    per_worker = 32
+    for world in (1, 2, 4, 8):
+        global_batch = per_worker * world
+        lr = scaled_lr(0.01, per_worker, global_batch)
+        # Linear rule against the GLOBAL batch: doubling workers doubles the LR.
+        assert abs(lr - 0.01 * world) < 1e-9
+
+
+def test_scaling_report_efficiency_is_internally_consistent():
+    """Guards against a table whose speedup and efficiency disagree."""
+    import json
+    import os
+
+    path = os.path.join(os.path.dirname(__file__), "..", "results", "scaling_cpu_gloo.json")
+    if not os.path.exists(path):
+        import pytest
+
+        pytest.skip("scaling study not run in this checkout")
+    report = json.load(open(path))
+    base = report["rows"][0]
+    for row in report["rows"]:
+        expected_speedup = row["aggregate_samples_per_s"] / base["aggregate_samples_per_s"]
+        assert abs(row["speedup"] - expected_speedup) < 1e-6
+        assert abs(row["efficiency"] - row["speedup"] / row["ideal_speedup"]) < 1e-6
+        # Efficiency above 1 at a larger world size would mean superlinear
+        # scaling, which for this workload means the baseline was mismeasured.
+        assert row["efficiency"] <= 1.05
+
+
+def test_comm_fraction_rises_with_world_size():
+    """The measured explanation for the efficiency gap must behave sensibly."""
+    import json
+    import os
+
+    path = os.path.join(os.path.dirname(__file__), "..", "results", "scaling_cpu_gloo.json")
+    if not os.path.exists(path):
+        import pytest
+
+        pytest.skip("scaling study not run in this checkout")
+    rows = json.load(open(path))["rows"]
+    fractions = [r["comm_fraction"] for r in rows]
+    assert fractions[0] == 0.0, "a single worker performs no all-reduce"
+    assert fractions == sorted(fractions), "comm fraction should not fall as workers are added"

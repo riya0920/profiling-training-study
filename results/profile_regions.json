@@ -1,0 +1,118 @@
+[
+  {
+    "config": "baseline",
+    "trace": "results/traces/baseline.json",
+    "regions_ms": {
+      "data_wait": 3321.67,
+      "forward": 4366.29,
+      "backward": 5099.34,
+      "optimizer": 382.12
+    },
+    "regions_pct": {
+      "data_wait": 25.2,
+      "forward": 33.2,
+      "backward": 38.7,
+      "optimizer": 2.9
+    },
+    "top_operators": [
+      {
+        "op": "ProfilerStep*",
+        "cpu_ms": 13171.88,
+        "calls": 10
+      },
+      {
+        "op": "autograd::engine::evaluate_function: ConvolutionBackward0",
+        "cpu_ms": 3963.99,
+        "calls": 40
+      },
+      {
+        "op": "ConvolutionBackward0",
+        "cpu_ms": 3959.02,
+        "calls": 40
+      },
+      {
+        "op": "aten::convolution_backward",
+        "cpu_ms": 3957.83,
+        "calls": 40
+      },
+      {
+        "op": "enumerate(DataLoader)#_SingleProcessDataLoaderIter.__next__",
+        "cpu_ms": 3318.28,
+        "calls": 10
+      },
+      {
+        "op": "aten::conv2d",
+        "cpu_ms": 2024.89,
+        "calls": 40
+      },
+      {
+        "op": "aten::convolution",
+        "cpu_ms": 2024.4,
+        "calls": 40
+      },
+      {
+        "op": "aten::_convolution",
+        "cpu_ms": 2022.35,
+        "calls": 40
+      }
+    ]
+  },
+  {
+    "config": "+prefetch",
+    "trace": "results/traces/plus_prefetch.json",
+    "regions_ms": {
+      "data_wait": 56.96,
+      "forward": 7045.58,
+      "backward": 7126.7,
+      "optimizer": 534.26
+    },
+    "regions_pct": {
+      "data_wait": 0.4,
+      "forward": 47.7,
+      "backward": 48.3,
+      "optimizer": 3.6
+    },
+    "top_operators": [
+      {
+        "op": "ProfilerStep*",
+        "cpu_ms": 14767.9,
+        "calls": 10
+      },
+      {
+        "op": "autograd::engine::evaluate_function: ConvolutionBackward0",
+        "cpu_ms": 5538.81,
+        "calls": 40
+      },
+      {
+        "op": "ConvolutionBackward0",
+        "cpu_ms": 5529.94,
+        "calls": 40
+      },
+      {
+        "op": "aten::convolution_backward",
+        "cpu_ms": 5527.34,
+        "calls": 40
+      },
+      {
+        "op": "aten::conv2d",
+        "cpu_ms": 3306.9,
+        "calls": 40
+      },
+      {
+        "op": "aten::convolution",
+        "cpu_ms": 3306.32,
+        "calls": 40
+      },
+      {
+        "op": "aten::_convolution",
+        "cpu_ms": 3304.3,
+        "calls": 40
+      },
+      {
+        "op": "aten::mkldnn_convolution",
+        "cpu_ms": 3303.18,
+        "calls": 40
+      }
+    ]
+  }
+]
