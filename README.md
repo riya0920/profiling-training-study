@@ -4,40 +4,82 @@ An instrumented baseline, then an optimisation ladder where every rung changes
 exactly one thing and the order is chosen by the profile rather than by a blog
 post. Negative results stay in the table.
 
-> **Status: ~65% built.** Instrumentation, the ladder, repeats-and-report,
-> committed profiler traces, and a **DDP weak-scaling study executed across real
-> processes** are done — all on **CPU**, and labelled as such everywhere. No GPU
-> exists on this machine, so there is no GPU number anywhere. See
-> [Roadmap](#roadmap).
+> **Status: ~85% built.** Instrumentation, the ladder, repeats-and-report,
+> committed profiler traces, **weak and strong DDP scaling studies executed
+> across real processes**, and an **ablation that refuted its own hypothesis**
+> are done — all on **CPU**, labelled as such everywhere. No GPU exists on this
+> machine, so there is no GPU number anywhere. See [Roadmap](#roadmap).
 
-## DDP weak-scaling, actually executed
+## DDP scaling, actually executed — weak and strong
 
-No GPU on this machine, so the study runs DDP over the **gloo** backend across
-real OS processes on CPU. Genuinely distributed — separate processes, real
-gradient all-reduce, real barriers — and labelled CPU/gloo everywhere rather than
-dressed up as a GPU result.
+No GPU here, so the study runs DDP over **gloo** across real OS processes on CPU.
+Genuinely distributed; labelled CPU/gloo rather than dressed up as a GPU result.
 
-| world | global batch | lr | samples/s (mean ± std) | speedup | ideal | efficiency | comm fraction |
-|---|---|---|---|---|---|---|---|
-| 1 | 32 | 0.0100 | 48.1 ± 1.9 | 1.00x | 1.00x | **100%** | 0.0% |
-| 2 | 64 | 0.0200 | 69.4 ± 4.5 | 1.44x | 2.00x | **72%** | 1.7% |
-| 4 | 128 | 0.0400 | 97.3 ± 12.7 | 2.02x | 4.00x | **51%** | 16.7% |
+**Weak scaling** (per-worker batch fixed — "more data in the same time"):
 
-**The comm fraction is measured, not inferred**: a backward pass with gradient
-sync is timed against the identical backward inside `model.no_sync()`, which
-skips the all-reduce. The difference is non-overlapped communication.
+| world | global batch | lr | samples/s (mean ± std) | speedup | efficiency |
+|---|---|---|---|---|---|
+| 1 | 32 | 0.0100 | 43.6 ± 1.6 | 1.00x | **100%** |
+| 2 | 64 | 0.0200 | 69.8 ± 1.7 | 1.60x | **80%** |
+| 4 | 128 | 0.0400 | 103.7 ± 13.9 | 2.38x | **59%** |
 
-**Where the missing 49% went at 4 workers** — 16.7% is measured communication;
-the larger remaining term is core contention, because 4 training processes plus
-their in-process decode plus gloo's collective threads oversubscribe 8 logical
-(4 physical) cores. [docs/SCALING.md](docs/SCALING.md) names the one experiment
-that would separate the two causes, rather than asserting a split it has not
-measured.
+**Strong scaling** (global batch fixed — "the same job, faster"):
 
-**One protocol detail that decides the whole result**: every worker is pinned to
-a single intra-op thread. Without that, the 1-worker baseline already uses every
-core and "scaling efficiency" would be measuring thread contention instead of
-communication.
+| world | per-worker batch | lr | samples/s (mean ± std) | speedup | efficiency |
+|---|---|---|---|---|---|
+| 1 | 128 | 0.0100 | 51.2 ± 4.0 | 1.00x | **100%** |
+| 2 | 64 | 0.0100 | 71.8 ± 8.3 | 1.40x | **70%** |
+| 4 | 32 | 0.0100 | 101.0 ± 6.4 | 1.97x | **49%** |
+
+Strong is worse at every size, as it should be: the per-worker batch shrinks, so
+each worker does less compute per synchronisation and fixed per-step overhead is
+amortised over less work.
+
+### A bug the strong-scaling run exposed
+
+The LR was scaling against the **per-worker** batch — right by accident under
+weak scaling, where they coincide. Under strong scaling it printed
+`lr 0.01 → 0.02 → 0.04` while the global batch never moved from 128. That is a
+hyperparameter change wearing a scaling study's clothes. Fixed to reference a
+fixed base batch; strong now holds `lr = 0.01` throughout.
+
+## The measurement that refused to cooperate
+
+An earlier version of this README stated **"16.7% is measured communication"**
+and attributed the scaling gap to it. **That number was noise and the claim was
+wrong.** Repeating the paired `no_sync` comparison seven times per worker shows
+why:
+
+| world | comm fraction (median) | spread across 7 trials |
+|---|---|---|
+| 2 | 6.3% | **±20.7 points** |
+| 4 | 2.3% | **±22.3 points** |
+
+The spread is three to ten times the median; consecutive runs of the same config
+gave 15.2% and 1.2%. On a contended CPU this estimator is a coin flip.
+**Communication cost is unmeasured on this hardware**, and the median is now
+reported *with* its spread so a reader can see it is unusable.
+
+### The ablation refuted the fallback hypothesis too
+
+With communication unmeasurable, the remaining explanation was CPU contention
+from the in-process decode. The ablation is one command — rerun world 4 with
+`--decode-cost 0`:
+
+| configuration | efficiency at world 4 |
+|---|---|
+| decode_cost = 60 (normal) | 59% ± 13.9 |
+| decode_cost = 0 (ablation) | **65% ± 0.9** |
+
+Removing *all* CPU-side data work recovers ~6 points, and the two overlap within
+the baseline's spread. **Decode contention is not the dominant term either.**
+
+Both candidate explanations have been tested and neither accounts for the ~35–41%
+loss. What remains untested is core oversubscription (4 workers plus gloo threads
+on 4 physical cores) and DDP's gradient-bucketing overhead.
+
+**Naming an unexplained gap is more useful than assigning it to whichever cause
+was measured last.** Full write-up in [docs/SCALING.md](docs/SCALING.md).
 
 ## Committed profiler traces
 
@@ -152,10 +194,12 @@ prices are not what anyone's bill actually says.
 | Committed profiler traces, before/after data-wait | done |
 | `docs/SCALING.md` incl. "when is DDP the wrong tool" | done |
 | **Same study on real GPUs with NCCL** | impossible here: no GPU |
-| **Contention-vs-communication ablation (decode_cost=0 at world 4)** | named, not run |
+| Contention-vs-communication ablation, executed | done |
+| Strong-scaling counterpart (global batch fixed) | done |
+| Comm fraction repeated and reported with its spread | done |
 | **`torch.compile` rung** | fails on this box: no MSVC toolchain (in the ledger) |
 | **Cost-to-target-ACCURACY table (this study measures throughput only)** | not done |
-| **Strong-scaling counterpart (fixed global batch)** | not done |
+| **CPU-pinning experiment to test core oversubscription** | named, not run |
 
 ## Honesty notes
 

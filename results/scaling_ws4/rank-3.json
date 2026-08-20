@@ -1,1 +1,1 @@
-{"rank": 3, "world_size": 4, "per_worker_samples_per_s": [26.902130930440958, 25.277435255394032, 20.775950185968775], "comm_fraction": 0.18130101412232957, "lr": 0.04, "global_batch": 128}
+{"rank": 3, "world_size": 4, "per_worker_samples_per_s": [28.143344431015322, 28.3145030238191, 28.59234821417191], "comm_fraction": 0.05334308144089068, "comm_fraction_spread": 0.14913800988126077, "lr": 0.04, "global_batch": 128}

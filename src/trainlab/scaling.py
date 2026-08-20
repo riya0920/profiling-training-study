@@ -44,6 +44,8 @@ RESULTS = os.path.join(ROOT, "results")
 
 def _worker_main():
     """Runs inside each spawned process."""
+    import statistics
+
     import torch
     import torch.distributed as dist
     import torch.nn as nn
@@ -83,7 +85,15 @@ def _worker_main():
         model = DDP(model)
 
     global_batch = batch * world
-    lr = scaled_lr(base_lr, batch, global_batch)
+    # The LR rule scales against a FIXED reference batch, not the per-worker
+    # batch. Using the per-worker batch as the reference is correct by accident
+    # under weak scaling (where they coincide) and WRONG under strong scaling: it
+    # would scale the LR with world size while the global batch is held constant,
+    # which is a hyperparameter change masquerading as a scaling result. Caught
+    # by the strong-scaling run printing lr 0.01 -> 0.02 -> 0.04 at a fixed
+    # global batch of 128.
+    ref_batch = int(os.environ.get("REF_BATCH", batch))
+    lr = scaled_lr(base_lr, ref_batch, global_batch)
     opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
     warm = warmup_steps(steps)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warm))
@@ -138,15 +148,28 @@ def _worker_main():
                         loss_fn(model(x), y).backward()
             return time.perf_counter() - t
 
-        _time(True, 3)
-        with_sync, without_sync = _time(True), _time(False)
-        comm_fraction = max(with_sync - without_sync, 0.0) / with_sync if with_sync else 0.0
+        # REPEATED and reported as a median. A single synced-vs-no_sync
+        # comparison is extremely noisy on a contended CPU: consecutive runs of
+        # the same configuration produced 15.2% and 1.2%, which is not a
+        # measurement, it is a coin flip. The median of several paired trials is
+        # stable enough to reason about; the spread is reported alongside it so a
+        # reader can see how much to trust it.
+        _time(True, 3)          # warm the allocator and the collective
+        fractions = []
+        for _ in range(7):
+            with_sync, without_sync = _time(True), _time(False)
+            if with_sync > 0:
+                fractions.append(max(with_sync - without_sync, 0.0) / with_sync)
+        fractions.sort()
+        comm_fraction = statistics.median(fractions) if fractions else 0.0
+        comm_fraction_spread = (fractions[-1] - fractions[0]) if len(fractions) > 1 else 0.0
 
     result = {
         "rank": rank,
         "world_size": world,
         "per_worker_samples_per_s": windows,
         "comm_fraction": comm_fraction,
+        "comm_fraction_spread": locals().get("comm_fraction_spread", 0.0),
         "lr": lr,
         "global_batch": global_batch,
     }
@@ -159,7 +182,7 @@ def _worker_main():
 
 
 def run_world_size(world: int, steps: int, batch: int, decode_cost: int, dataset_n: int,
-                   base_lr: float, port: int) -> dict:
+                   base_lr: float, port: int, ref_batch: int = None) -> dict:
     out_dir = os.path.join(RESULTS, "scaling_ws%d" % world)
     os.makedirs(out_dir, exist_ok=True)
     for f in os.listdir(out_dir):
@@ -169,6 +192,7 @@ def run_world_size(world: int, steps: int, batch: int, decode_cost: int, dataset
     env.update({
         "WORLD_SIZE": str(world), "STEPS": str(steps), "PER_WORKER_BATCH": str(batch),
         "DECODE_COST": str(decode_cost), "DATASET_N": str(dataset_n), "BASE_LR": str(base_lr),
+        "REF_BATCH": str(ref_batch or batch),
         "OUT_DIR": out_dir, "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": str(port),
         "TRAINLAB_DDP_WORKER": "1",
         "OMP_NUM_THREADS": "1",
@@ -208,6 +232,7 @@ def run_world_size(world: int, steps: int, batch: int, decode_cost: int, dataset
         "aggregate_samples_per_s": statistics.fmean(per_window_totals),
         "std": statistics.stdev(per_window_totals) if len(per_window_totals) > 1 else 0.0,
         "comm_fraction": statistics.fmean([r["comm_fraction"] for r in ranks]),
+        "comm_fraction_spread": statistics.fmean([r.get("comm_fraction_spread", 0.0) for r in ranks]),
         "wall_s": wall,
     }
 
@@ -221,16 +246,29 @@ def main():
     ap.add_argument("--dataset-n", type=int, default=4000)
     ap.add_argument("--base-lr", type=float, default=0.01)
     ap.add_argument("--port", type=int, default=29517)
+    ap.add_argument("--strong", action="store_true",
+                    help="strong scaling: hold the GLOBAL batch fixed and shrink the per-worker batch")
+    ap.add_argument("--tag", default=None, help="suffix for the results filename")
     args = ap.parse_args()
 
     rows = []
     for i, world in enumerate(args.world_sizes):
-        print("running world_size=%d ..." % world)
-        row = run_world_size(world, args.steps, args.batch, args.decode_cost, args.dataset_n,
-                             args.base_lr, args.port + i)
+        # Strong scaling holds the GLOBAL batch fixed, so each worker gets a
+        # SMALLER slice as the world grows. That is a different experiment from
+        # weak scaling and answers a different question: weak scaling asks "can I
+        # train on more data in the same time", strong scaling asks "can I train
+        # the same job faster". They have different answers and conflating them
+        # is the most common error in a scaling table.
+        batch = max(args.batch // world, 1) if args.strong else args.batch
+        print("running world_size=%d (per-worker batch %d) ..." % (world, batch))
+        # Reference batch for the LR rule: the global batch at world size 1.
+        ref_batch = args.batch
+        row = run_world_size(world, args.steps, batch, args.decode_cost, args.dataset_n,
+                             args.base_lr, args.port + i, ref_batch=ref_batch)
         rows.append(row)
-        print("  aggregate %.1f +/- %.1f samples/s   comm_fraction=%.3f"
-              % (row["aggregate_samples_per_s"], row["std"], row["comm_fraction"]))
+        print("  aggregate %.1f +/- %.1f samples/s   comm_fraction=%.3f (spread %.3f)"
+              % (row["aggregate_samples_per_s"], row["std"], row["comm_fraction"],
+                 row.get("comm_fraction_spread", 0.0)))
 
     base = rows[0]["aggregate_samples_per_s"]
     base_world = rows[0]["world_size"]
@@ -241,7 +279,9 @@ def main():
         row["efficiency"] = row["speedup"] / row["ideal_speedup"]
 
     report = {
-        "scaling": "weak (per-worker batch fixed, global batch grows)",
+        "scaling": ("strong (global batch fixed, per-worker batch shrinks)" if args.strong
+                    else "weak (per-worker batch fixed, global batch grows)"),
+        "decode_cost": args.decode_cost,
         "backend": "gloo",
         "device": "cpu",
         "hardware": {"platform": platform.platform(),
@@ -252,7 +292,8 @@ def main():
         "rows": rows,
     }
     os.makedirs(RESULTS, exist_ok=True)
-    path = os.path.join(RESULTS, "scaling_cpu_gloo.json")
+    suffix = args.tag or ("strong" if args.strong else "weak")
+    path = os.path.join(RESULTS, "scaling_cpu_gloo_%s.json" % suffix)
     with open(path, "w") as fh:
         json.dump(report, fh, indent=2)
 
@@ -260,10 +301,10 @@ def main():
     print("| world | global batch | lr | samples/s (mean ± std) | speedup | ideal | efficiency | comm fraction |")
     print("|---|---|---|---|---|---|---|---|")
     for r in rows:
-        print("| %d | %d | %.4f | %.1f ± %.1f | %.2fx | %.2fx | %.0f%% | %.1f%% |"
+        print("| %d | %d | %.4f | %.1f ± %.1f | %.2fx | %.2fx | %.0f%% | %.1f%% ± %.1f |"
               % (r["world_size"], r["global_batch"], r["lr"], r["aggregate_samples_per_s"],
                  r["std"], r["speedup"], r["ideal_speedup"], 100 * r["efficiency"],
-                 100 * r["comm_fraction"]))
+                 100 * r["comm_fraction"], 100 * r.get("comm_fraction_spread", 0.0)))
     print("\nwrote", path)
 
 
