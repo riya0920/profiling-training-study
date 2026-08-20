@@ -1,97 +1,134 @@
-# DDP weak-scaling study (CPU / gloo)
+# DDP scaling study (CPU / gloo) — and a measurement that refused to cooperate
 
-Produced by `python -m trainlab.scaling --world-sizes 1 2 4 --steps 30`.
-Raw data: `results/scaling_cpu_gloo.json`.
+Produced by `python -m trainlab.scaling`. Raw data in `results/`.
 
 ## What this is, and what it is not
 
-This machine has **no GPU**. The study therefore runs DistributedDataParallel
-over the **gloo** backend across real OS processes on CPU. That is genuinely
-distributed data-parallel training — separate processes, real gradient
-all-reduce, real synchronisation barriers — and every number below is labelled
-CPU/gloo.
+This machine has **no GPU**. The study runs DistributedDataParallel over the
+**gloo** backend across real OS processes on CPU: separate processes, real
+gradient all-reduce, real barriers. Every number is labelled CPU/gloo.
 
-**What transfers to a GPU cluster:** the method. Weak scaling with a fixed
-per-worker batch, an LR rule declared before the run, warmup excluded, three
-non-overlapping measurement windows, and a *measured* communication fraction to
-explain the efficiency gap rather than a hand-wave.
+**Transfers to a GPU cluster:** the method — weak *and* strong scaling run
+separately, an LR rule fixed before the runs, warmup excluded, three
+non-overlapping measurement windows, an ablation to test the explanation, and a
+comm-fraction measurement reported with its spread.
 
-**What does not transfer:** the numbers. gloo over loopback has nothing like
-NCCL-over-NVLink bandwidth, and CPU workers contend for the very cores the
-all-reduce runs on. **A 4-worker CPU efficiency figure says nothing about 4-GPU
-efficiency**, and it is not offered as a proxy for one.
+**Does not transfer:** the numbers. gloo over loopback is nothing like NCCL over
+NVLink, and CPU workers contend for the very cores the all-reduce runs on.
 
 ## Protocol, fixed before the first run
 
 | decision | value | why |
 |---|---|---|
-| scaling mode | **weak** — per-worker batch fixed at 32 | Strong scaling (fixed global batch, shrinking per-worker batch) is a *different* experiment with a different answer. Conflating them is the most common error in scaling tables. |
-| LR rule | linear in global batch (Goyal et al.) | Declared in `workload.py` before any run, so this is not a hyperparameter search wearing a scaling study's clothes. |
-| warmup | 5% of steps, excluded | The first steps pay allocator growth and worker startup. |
-| windows | 3 non-overlapping, mean ± std | One window cannot distinguish a result from noise. |
-| threads per worker | **1** (`torch.set_num_threads(1)`, `OMP_NUM_THREADS=1`) | Critical. Without it, the 1-worker baseline already uses every core, and "scaling efficiency" would measure thread contention rather than communication. |
+| scaling modes | **weak and strong, separately** | Different experiments with different answers. Weak asks "more data in the same time"; strong asks "the same job, faster". |
+| LR rule | linear against a **fixed reference batch** | See the bug below. |
+| warmup | 5% of steps, excluded | The first steps pay allocator growth. |
+| windows | 3 non-overlapping, mean ± std | One window cannot separate result from noise. |
+| threads per worker | **1** | Otherwise the 1-worker baseline already uses every core and "efficiency" measures thread contention. |
 
-## Results
+### A bug the strong-scaling run exposed
 
-Hardware: Windows 11, Intel64 Family 6 Model 126 (Ice Lake mobile), 8 logical
-CPUs. Backend gloo, device CPU, 30 steps per run.
+The LR was being scaled against the **per-worker** batch. Under weak scaling
+those coincide, so it was right by accident. Under strong scaling — global batch
+held at 128 — it printed `lr 0.01 → 0.02 → 0.04` while the global batch never
+changed. That is a hyperparameter change wearing a scaling study's clothes, and
+it would have made the strong-scaling curve meaningless.
 
-| world | global batch | lr | samples/s (mean ± std) | speedup | ideal | efficiency | comm fraction |
-|---|---|---|---|---|---|---|---|
-| 1 | 32 | 0.0100 | 48.1 ± 1.9 | 1.00x | 1.00x | **100%** | 0.0% |
-| 2 | 64 | 0.0200 | 69.4 ± 4.5 | 1.44x | 2.00x | **72%** | 1.7% |
-| 4 | 128 | 0.0400 | 97.3 ± 12.7 | 2.02x | 4.00x | **51%** | 16.7% |
+Fixed: the rule now scales against a fixed reference batch, so strong scaling
+holds `lr = 0.01` throughout and weak scaling still scales with world size.
+`test_scaling_protocol_is_weak_and_lr_follows_global_batch` pins it.
 
-## Where did the missing 49% go?
+## Weak scaling (per-worker batch fixed at 32)
 
-At 4 workers the efficiency is 51%, so roughly half the added compute produced
-no throughput. The honest accounting:
+| world | global batch | lr | samples/s (mean ± std) | speedup | efficiency | comm fraction |
+|---|---|---|---|---|---|---|
+| 1 | 32 | 0.0100 | 43.6 ± 1.6 | 1.00x | **100%** | 0.0% |
+| 2 | 64 | 0.0200 | 69.8 ± 1.7 | 1.60x | **80%** | 6.3% ± 20.7 |
+| 4 | 128 | 0.0400 | 103.7 ± 13.9 | 2.38x | **59%** | 2.3% ± 22.3 |
 
-**1. Communication: 16.7% (measured).** The comm fraction is measured directly,
-not inferred — a backward pass with gradient sync is timed against the identical
-backward inside `model.no_sync()`, which skips the all-reduce entirely. The
-difference is non-overlapped communication. It rises 0% → 1.7% → 16.7%, which is
-the expected shape: gloo's all-reduce cost grows with participant count while the
-per-worker gradient volume stays fixed.
+## Strong scaling (global batch fixed at 128)
 
-**2. Core contention: the rest, and it is the larger term.** This is the part a
-GPU study would not have. Each worker is pinned to one intra-op thread, but each
-worker also runs its own dataloader decode *in-process* (`num_workers=0` inside
-the DDP run), and gloo's collective threads run on the same 8 logical cores. At
-world size 4 the machine is oversubscribed: 4 training processes + 4 decode
-workloads + collective traffic on 8 logical (4 physical) cores.
+| world | per-worker batch | lr | samples/s (mean ± std) | speedup | efficiency |
+|---|---|---|---|---|---|
+| 1 | 128 | 0.0100 | 51.2 ± 4.0 | 1.00x | **100%** |
+| 2 | 64 | 0.0100 | 71.8 ± 8.3 | 1.40x | **70%** |
+| 4 | 32 | 0.0100 | 101.0 ± 6.4 | 1.97x | **49%** |
 
-**3. Variance grows with world size** — ±1.9 at one worker, ±12.7 at four. With
-three windows that spread is wide enough that the 51% figure should be read as
-"roughly half", not as 51.0%.
+Strong scaling is **worse at every world size**, which is the expected shape: the
+per-worker batch shrinks as workers are added, so each worker does less compute
+per synchronisation and the fixed per-step overhead is amortised over less work.
 
-**The measurement I would run next** to separate (1) from (2): re-run at world
-size 4 with `decode_cost=0`, removing the CPU-side data work entirely. If
-efficiency jumps, contention dominates; if it stays near 51%, communication does.
-That is one command and it is the honest next step rather than a conclusion
-asserted here.
+## The comm-fraction measurement does not work here, and that is the finding
+
+An earlier version of this document stated *"16.7% is measured communication"*
+and attributed the scaling gap to it. **That number was noise, and reporting it
+as a measurement was wrong.**
+
+The comm fraction is estimated by timing a backward pass with gradient sync
+against the same backward inside `model.no_sync()`. Repeating that paired
+comparison seven times per worker and reporting the spread shows why the single
+measurement was untrustworthy:
+
+| world | comm fraction (median) | spread across 7 trials |
+|---|---|---|
+| 2 | 6.3% | **±20.7 points** |
+| 4 | 2.3% | **±22.3 points** |
+
+**The spread is three to ten times the median.** Consecutive runs of the same
+configuration produced 15.2% and 1.2%. On a contended CPU where the collective
+threads share cores with the compute, this estimator is a coin flip, and no
+attribution built on it is defensible.
+
+The honest position: **communication cost is unmeasured on this hardware.** The
+median is reported with its spread so a reader can see it is unusable, rather
+than quoted as a clean number.
+
+## The ablation, which refuted the fallback hypothesis too
+
+With communication unmeasurable, the remaining hypothesis was CPU contention from
+the in-process data decode. The ablation is one command: rerun world 4 with
+`--decode-cost 0`, removing that work entirely.
+
+| configuration | efficiency at world 4 |
+|---|---|
+| decode_cost = 60 (normal) | 59% ± 13.9 |
+| **decode_cost = 0 (ablation)** | **65% ± 0.9** |
+
+Removing *all* CPU-side data work recovers about 6 percentage points — and the
+two figures overlap within the ±13.9 spread of the baseline. **Decode contention
+is not the dominant term either.**
+
+So both candidate explanations have now been tested and neither accounts for the
+~35–41% loss at four workers. What remains, untested:
+
+* **Core oversubscription.** Four training processes plus gloo's collective
+  threads on 8 logical / 4 physical cores. Testing this needs either fewer
+  workers than physical cores or explicit CPU pinning.
+* **DDP gradient bucketing overhead**, which is per-step and independent of the
+  data pipeline.
+
+**Naming an unexplained gap is more useful than assigning it to whichever cause
+was measured last.** The next experiment is stated rather than the conclusion.
 
 ## When is DDP the wrong tool?
 
 * **The model does not fit on one device** → DDP replicates the full model per
-  worker, so it cannot help. FSDP / tensor parallelism / pipeline parallelism.
-* **The model is tiny** → exactly this study. Communication is a fixed cost per
-  step against a small compute budget, so the comm fraction climbs fast. At
-  `SmallCNN` size, scaling past 2 workers on this hardware is already a poor
-  trade.
+  worker. FSDP / tensor / pipeline parallelism instead.
+* **The model is tiny** → exactly this study. Per-step synchronisation is a fixed
+  cost against a small compute budget, so efficiency falls fast. At `SmallCNN`
+  size, scaling past two workers on this hardware is already a poor trade.
 * **The bottleneck is the input pipeline** → adding workers multiplies the data
-  problem instead of solving it. The optimisation ladder exists to check this
-  first, and it is why the ladder runs before the scaling study rather than after.
-* **Batch size is already at the limit of what the LR schedule tolerates** →
-  weak scaling grows the global batch, and past some point the linear LR rule
-  destabilises regardless of hardware.
+  problem. The optimisation ladder runs *before* the scaling study for this
+  reason.
+* **The global batch is already at the limit the LR schedule tolerates** → weak
+  scaling grows it further, and past some point the linear rule destabilises
+  regardless of hardware.
 
 ## Cost
 
-`python -m trainlab.cost --ledger results/ladder_cpu.json --rate 0.35` converts
-any ledger into a cost-to-target table and a break-even for scaling. The direct
-compute cost of **this** study was **$0** — it ran on a local laptop — so the
-rate is a required input rather than a hard-coded constant. On rented hardware
-the 4-worker row above would cost 4x the 1-worker row for 2.02x the throughput,
-which at these efficiencies is a bad trade unless wall-clock is worth more than
-2x the money.
+`python -m trainlab.cost --ledger results/ladder_cpu.json --rate 0.35` converts a
+ledger into a cost-to-target table and a scaling break-even. This study's direct
+compute cost was **$0** — local hardware — so the rate is a required input rather
+than a constant. At the measured efficiencies, four rented workers would cost 4x
+for 2.4x the throughput: a bad trade unless wall-clock is worth more than 1.7x
+the money.

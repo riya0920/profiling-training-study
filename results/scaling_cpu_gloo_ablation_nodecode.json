@@ -1,0 +1,53 @@
+{
+  "scaling": "weak (per-worker batch fixed, global batch grows)",
+  "decode_cost": 0,
+  "backend": "gloo",
+  "device": "cpu",
+  "hardware": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "processor": "Intel64 Family 6 Model 126 Stepping 5, GenuineIntel",
+    "cpu_count": 8
+  },
+  "steps_per_run": 30,
+  "threads_per_worker": 1,
+  "rows": [
+    {
+      "world_size": 1,
+      "per_worker_batch": 32,
+      "global_batch": 32,
+      "lr": 0.01,
+      "windows": [
+        42.28614324847332,
+        45.083873404276645,
+        42.54683492423405
+      ],
+      "aggregate_samples_per_s": 43.30561719232801,
+      "std": 1.5455214019718968,
+      "comm_fraction": 0.0,
+      "comm_fraction_spread": 0.0,
+      "wall_s": 49.80638030002592,
+      "speedup": 1.0,
+      "ideal_speedup": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "world_size": 4,
+      "per_worker_batch": 32,
+      "global_batch": 128,
+      "lr": 0.04,
+      "windows": [
+        112.57520698189789,
+        113.227023715482,
+        114.41539358668075
+      ],
+      "aggregate_samples_per_s": 113.40587476135356,
+      "std": 0.9330393654946045,
+      "comm_fraction": 0.060216967218620646,
+      "comm_fraction_spread": 0.15586351173340768,
+      "wall_s": 195.32937069999753,
+      "speedup": 2.6187335988700435,
+      "ideal_speedup": 4.0,
+      "efficiency": 0.6546833997175109
+    }
+  ]
+}
