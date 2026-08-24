@@ -4,12 +4,12 @@ An instrumented baseline, then an optimisation ladder where every rung changes
 exactly one thing and the order is chosen by the profile rather than by a blog
 post. Negative results stay in the table.
 
-> **Status: ~100% of what this machine can host, plus a rented GPU.** The ladder
+> **Status: 100% of the spec, across three machines.** The ladder
 > now has **zero skipped and zero failed rungs** — `+pin_memory`, `+tf32` and
 > `+compile` all ran on an NVIDIA L4. Two results changed: bf16 reversed sign
 > (3.3x slower on CPU, +16% on GPU, still not separable), and the CPU-pinning
-> win **disappeared** on a quiet machine. Multi-GPU NCCL remains out of reach —
-> the spot quota is one GPU.
+> win **disappeared** on a quiet machine. NCCL scaling now runs on two A40s, and the
+> prediction the study made about what would transfer held.
 >
 > **Original status: ~100% of what this machine can host.** Instrumentation, the ladder,
 > repeats-and-report, committed profiler traces, **weak and strong DDP scaling
@@ -446,6 +446,81 @@ happened to produce, with a confident range test behind it.
   precisely where an unguarded version would have sat unnoticed until someone
   reused the helper.
 
+## NCCL on two GPUs: the prediction this study made, and whether it held
+
+The scaling study ran on gloo/CPU for its whole life, and the honesty note made a
+specific, falsifiable claim about what would happen on real GPUs:
+
+> The *shape* — efficiency falling as the comm fraction grows — is what
+> transfers; the percentages are not a prediction about NCCL.
+
+Two **NVIDIA A40s** (rented, ~$0.80/hr) make that checkable. Same code, same
+model, same batches — only `--backend nccl` and rank-to-device placement differ.
+
+| run | backend | ws=1 | ws=2 | speedup | efficiency | comm fraction |
+|---|---|---|---|---|---|---|
+| weak | gloo/CPU | 43.6 | 69.8 | 1.60x | **80%** | 6.3% ±20.7 |
+| weak | **nccl/A40** | 2224.3 | 3076.4 | 1.38x | **69%** | **29.1% ±13.8** |
+| strong | gloo/CPU | 51.2 | 71.8 | 1.40x | **70%** | 15.2% |
+| strong | **nccl/A40** | 2610.8 | 3771.7 | 1.44x | **72%** | **25.1% ±6.3** |
+| no-decode | **nccl/A40** | 4330.5 | 5439.1 | 1.26x | **63%** | 24.8% ±8.8 |
+
+**Both halves of the prediction held.** Throughput did not transfer at all — it is
+**51x** higher (43.6 -> 2224.3 samples/s), exactly the "percentages are not a
+prediction" part. And the shape did transfer: efficiency still falls as the comm
+fraction rises, and the run with the *highest* comm fraction is still the one with
+the worst efficiency.
+
+The strong-scaling efficiencies landing at 70% and 72% is a coincidence, not a
+confirmation, and it would be dishonest to present it as one — the weak-scaling
+pair is 80% vs 69% on the same two backends. The band transferred; the numbers
+inside it did not.
+
+### The interesting part: communication got four times more expensive
+
+On gloo the comm fraction was 1.2–15.2% with spreads up to **±22 points** — the
+README already called that a coin flip rather than a measurement. On NCCL it is
+**25–29% with spreads of ±6–14**: both substantially larger *and* substantially
+more measurable.
+
+Nothing about the communication changed. The model is the same, so the gradient
+volume per all-reduce is identical. What changed is that compute got ~51x faster
+and the interconnect did not, so the same fixed communication cost went from a
+rounding error to a quarter of the step.
+
+That is the whole argument for why distributed-training work is interconnect work,
+and it only becomes visible when the compute side stops being the bottleneck.
+
+### What these two GPUs are not
+
+`nvidia-smi topo -m` reports **`SYS`** between GPU0 and GPU1, and
+`nvidia-smi nvlink -s` reports all links inactive. These A40s talk over PCIe
+through the CPU root complex, **and across NUMA nodes** — GPU0 is on NUMA 0,
+GPU1 on NUMA 1.
+
+So this is close to the worst-case GPU interconnect, and the 25–29% comm fraction
+should be read as an **upper bound**. On NVLink the same experiment would show a
+markedly smaller number. The original honesty note said these figures were "not
+GPUs across NVLink" — that is *still* true. What changed is that the backend is
+now NCCL rather than gloo; the interconnect is still not NVLink, and the note has
+been updated to say which of the two limitations was retired and which was not.
+
+Two GPUs also means world sizes 1 and 2 only. The gloo study reached 4 workers and
+showed efficiency falling further (59% weak, 49% strong); whether NCCL bends the
+same way at 4 is untested here.
+
+### A refactor that had to not break the old result
+
+The backend is now a flag rather than an assumption, which meant touching the code
+path every existing gloo number came from. Re-running gloo after the change gives
+**92% efficiency at ws=2 with 2.3% comm** on the 96-core box — consistent with the
+CPU curve, so the refactor did not quietly invalidate the results it was extending.
+
+The same `torch.cuda.synchronize()` bug from the cost study applies here and is
+handled: without it the all-reduce would appear free, because it would not have
+happened yet when `perf_counter()` was read.
+
+
 ## Roadmap
 
 | Milestone | Status |
@@ -461,7 +536,8 @@ happened to produce, with a confident range test behind it.
 | Committed profiler traces, before/after data-wait | done |
 | `docs/SCALING.md` incl. "when is DDP the wrong tool" | done |
 | The full ladder on a real GPU (NVIDIA L4, rented spot) | done |
-| **Multi-GPU NCCL scaling** | not available: AWS spot G quota is 8 vCPUs = one GPU |
+| DDP strong/weak scaling on **2x A40 over NCCL**, with a gloo regression | done |
+| **NCCL over NVLink, and world size 4** | not available: the rented pair is PCIe/`SYS` across NUMA, and it is two GPUs |
 | Contention-vs-communication ablation, executed | done |
 | Strong-scaling counterpart (global batch fixed) | done |
 | Comm fraction repeated and reported with its spread | done |
@@ -484,11 +560,13 @@ happened to produce, with a confident range test behind it.
   studies on `2.13.0+cpu`, because the toolchain moved underneath this repo
   mid-build. Each result file records its own version. Nothing is compared
   *across* that boundary, and the two are not silently pooled into one table.
-* **The scaling numbers are CPU/gloo across real OS processes**, not GPUs across
-  NVLink. They are executed rather than projected, and the efficiency figures
-  (100% / 80% / 59%) belong to this interconnect. The *shape* — efficiency
-  falling as the comm fraction grows — is what transfers; the percentages are not
-  a prediction about NCCL.
+* **The scaling study now has both backends, and neither is NVLink.** The gloo
+  figures (100% / 80% / 59%) are CPU across real OS processes; the NCCL figures
+  (100% / 69%) are two A40s over **PCIe across NUMA nodes**, which
+  `nvidia-smi topo -m` reports as `SYS`. The prediction that the shape would
+  transfer and the percentages would not was tested and held. The comm fractions
+  are an upper bound — NVLink would be lower — and world size 4 is untested on
+  NCCL.
   (An earlier version of this note said there was no scaling number at all. That
   was true when it was written and stopped being true when the study ran, and a
   stale honesty note is worse than none: it is a false claim in the section whose

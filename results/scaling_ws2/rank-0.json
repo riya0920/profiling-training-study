@@ -1,1 +1,0 @@
-{"rank": 0, "world_size": 2, "per_worker_samples_per_s": [34.62484997574024, 35.933289892315734, 34.18748375483493], "comm_fraction": 0.008931492217843453, "comm_fraction_spread": 0.22431003140892192, "lr": 0.02, "global_batch": 64}

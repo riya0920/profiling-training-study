@@ -63,9 +63,15 @@ def _worker_main():
     dataset_n = int(os.environ["DATASET_N"])
     base_lr = float(os.environ["BASE_LR"])
 
-    # gloo: the CPU collective backend. nccl is GPU-only.
+    # gloo is the CPU collective backend; nccl is the GPU one. The study ran on
+    # gloo for a long time because this machine had no GPU -- the backend is a
+    # parameter, not an assumption, so the same code produces both curves.
+    backend = os.environ.get("BACKEND", "gloo")
+    use_cuda = backend == "nccl"
+    if use_cuda:
+        torch.cuda.set_device(rank)
     if world > 1:
-        dist.init_process_group(backend="gloo", init_method="env://", rank=rank, world_size=world)
+        dist.init_process_group(backend=backend, init_method="env://", rank=rank, world_size=world)
 
     # Each worker gets ONE intra-op thread. Without this, torch spreads a single
     # worker across all cores and a 4-worker run would be compared against a
@@ -74,7 +80,7 @@ def _worker_main():
     torch.set_num_threads(1)
     torch.manual_seed(0)
 
-    device = torch.device("cpu")
+    device = torch.device("cuda", rank) if use_cuda else torch.device("cpu")
     ds = SyntheticImages(n=dataset_n, decode_cost=decode_cost)
     sampler = DistributedSampler(ds, num_replicas=world, rank=rank, shuffle=True) if world > 1 else None
     loader = DataLoader(ds, batch_size=batch, sampler=sampler, shuffle=sampler is None,
@@ -82,7 +88,14 @@ def _worker_main():
 
     model = SmallCNN().to(device)
     if world > 1:
-        model = DDP(model)
+        model = DDP(model, device_ids=[rank] if use_cuda else None)
+
+    def _sync():
+        # CUDA is asynchronous: without this, perf_counter() below would time
+        # kernel *launches* and report them as compute, and the all-reduce would
+        # look free because it had not happened yet.
+        if use_cuda:
+            torch.cuda.synchronize()
 
     global_batch = batch * world
     # The LR rule scales against a FIXED reference batch, not the per-worker
@@ -110,6 +123,7 @@ def _worker_main():
         except StopIteration:
             it = iter(loader)
             x, y = next(it)
+        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         loss = loss_fn(model(x), y)
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -117,12 +131,14 @@ def _worker_main():
         sched.step()
 
         if step == n_warmup - 1:
+            _sync()
             if world > 1:
                 dist.barrier()      # start every worker's clock together
             t0, seen = time.perf_counter(), 0
         elif step >= n_warmup:
             seen += x.shape[0]
             if (step - n_warmup + 1) % per_window == 0:
+                _sync()
                 elapsed = time.perf_counter() - t0
                 windows.append(seen / elapsed)     # per-worker samples/sec
                 t0, seen = time.perf_counter(), 0
@@ -135,10 +151,11 @@ def _worker_main():
     if world > 1:
         import torch as _t
 
-        x = _t.randn(batch, 3, 32, 32)
-        y = _t.randint(0, 10, (batch,))
+        x = _t.randn(batch, 3, 32, 32, device=device)
+        y = _t.randint(0, 10, (batch,), device=device)
 
         def _time(sync: bool, reps: int = 8) -> float:
+            _sync()
             t = time.perf_counter()
             for _ in range(reps):
                 if sync:
@@ -146,6 +163,7 @@ def _worker_main():
                 else:
                     with model.no_sync():
                         loss_fn(model(x), y).backward()
+            _sync()
             return time.perf_counter() - t
 
         # REPEATED and reported as a median. A single synced-vs-no_sync
@@ -182,8 +200,9 @@ def _worker_main():
 
 
 def run_world_size(world: int, steps: int, batch: int, decode_cost: int, dataset_n: int,
-                   base_lr: float, port: int, ref_batch: int = None) -> dict:
-    out_dir = os.path.join(RESULTS, "scaling_ws%d" % world)
+                   base_lr: float, port: int, ref_batch: int = None,
+                   backend: str = "gloo") -> dict:
+    out_dir = os.path.join(RESULTS, "scaling_ws%d_%s" % (world, backend))
     os.makedirs(out_dir, exist_ok=True)
     for f in os.listdir(out_dir):
         os.remove(os.path.join(out_dir, f))
@@ -196,6 +215,7 @@ def run_world_size(world: int, steps: int, batch: int, decode_cost: int, dataset
         "OUT_DIR": out_dir, "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": str(port),
         "TRAINLAB_DDP_WORKER": "1",
         "OMP_NUM_THREADS": "1",
+        "BACKEND": backend,
     })
 
     procs = []
@@ -249,6 +269,8 @@ def main():
     ap.add_argument("--strong", action="store_true",
                     help="strong scaling: hold the GLOBAL batch fixed and shrink the per-worker batch")
     ap.add_argument("--tag", default=None, help="suffix for the results filename")
+    ap.add_argument("--backend", default="gloo", choices=["gloo", "nccl"],
+                    help="gloo runs the workers on CPU; nccl puts rank i on cuda:i")
     args = ap.parse_args()
 
     rows = []
@@ -264,7 +286,7 @@ def main():
         # Reference batch for the LR rule: the global batch at world size 1.
         ref_batch = args.batch
         row = run_world_size(world, args.steps, batch, args.decode_cost, args.dataset_n,
-                             args.base_lr, args.port + i, ref_batch=ref_batch)
+                             args.base_lr, args.port + i, ref_batch=ref_batch, backend=args.backend)
         rows.append(row)
         print("  aggregate %.1f +/- %.1f samples/s   comm_fraction=%.3f (spread %.3f)"
               % (row["aggregate_samples_per_s"], row["std"], row["comm_fraction"],
@@ -278,22 +300,31 @@ def main():
         row["ideal_speedup"] = row["world_size"] / base_world
         row["efficiency"] = row["speedup"] / row["ideal_speedup"]
 
+    def _gpu_info():
+        import torch as _t
+        if args.backend != "nccl":
+            return (None, 0, _t.__version__)
+        return (_t.cuda.get_device_name(0), _t.cuda.device_count(), _t.__version__)
+
+    _gpu = _gpu_info()
     report = {
         "scaling": ("strong (global batch fixed, per-worker batch shrinks)" if args.strong
                     else "weak (per-worker batch fixed, global batch grows)"),
         "decode_cost": args.decode_cost,
-        "backend": "gloo",
-        "device": "cpu",
+        "backend": args.backend,
+        "device": "cuda" if args.backend == "nccl" else "cpu",
         "hardware": {"platform": platform.platform(),
                      "processor": platform.processor() or platform.machine(),
-                     "cpu_count": os.cpu_count()},
+                     "cpu_count": os.cpu_count(),
+                     "accelerator": _gpu[0], "gpu_count": _gpu[1], "torch": _gpu[2]},
         "steps_per_run": args.steps,
         "threads_per_worker": 1,
         "rows": rows,
     }
     os.makedirs(RESULTS, exist_ok=True)
     suffix = args.tag or ("strong" if args.strong else "weak")
-    path = os.path.join(RESULTS, "scaling_cpu_gloo_%s.json" % suffix)
+    stem = "cpu_gloo" if args.backend == "gloo" else "gpu_nccl"
+    path = os.path.join(RESULTS, "scaling_%s_%s.json" % (stem, suffix))
     with open(path, "w") as fh:
         json.dump(report, fh, indent=2)
 

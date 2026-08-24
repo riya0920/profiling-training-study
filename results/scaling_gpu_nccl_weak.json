@@ -1,0 +1,56 @@
+{
+  "scaling": "weak (per-worker batch fixed, global batch grows)",
+  "decode_cost": 60,
+  "backend": "nccl",
+  "device": "cuda",
+  "hardware": {
+    "platform": "Linux-6.8.0-87-generic-x86_64-with-glibc2.39",
+    "processor": "x86_64",
+    "cpu_count": 96,
+    "accelerator": "NVIDIA A40",
+    "gpu_count": 2,
+    "torch": "2.8.0+cu128"
+  },
+  "steps_per_run": 40,
+  "threads_per_worker": 1,
+  "rows": [
+    {
+      "world_size": 1,
+      "per_worker_batch": 32,
+      "global_batch": 32,
+      "lr": 0.01,
+      "windows": [
+        2247.9063119785574,
+        2211.586701186457,
+        2213.360272883415
+      ],
+      "aggregate_samples_per_s": 2224.28442868281,
+      "std": 20.476362395931137,
+      "comm_fraction": 0.0,
+      "comm_fraction_spread": 0.0,
+      "wall_s": 4.744060192257166,
+      "speedup": 1.0,
+      "ideal_speedup": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "world_size": 2,
+      "per_worker_batch": 32,
+      "global_batch": 64,
+      "lr": 0.02,
+      "windows": [
+        3145.680630343194,
+        3038.3622955711426,
+        3045.1655151285177
+      ],
+      "aggregate_samples_per_s": 3076.4028136809516,
+      "std": 60.092702220834916,
+      "comm_fraction": 0.2906080033438758,
+      "comm_fraction_spread": 0.13839303047463167,
+      "wall_s": 7.529166731983423,
+      "speedup": 1.3830977612439406,
+      "ideal_speedup": 2.0,
+      "efficiency": 0.6915488806219703
+    }
+  ]
+}
