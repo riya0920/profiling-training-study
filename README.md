@@ -4,11 +4,14 @@ An instrumented baseline, then an optimisation ladder where every rung changes
 exactly one thing and the order is chosen by the profile rather than by a blog
 post. Negative results stay in the table.
 
-> **Status: ~85% built.** Instrumentation, the ladder, repeats-and-report,
-> committed profiler traces, **weak and strong DDP scaling studies executed
-> across real processes**, and an **ablation that refuted its own hypothesis**
-> are done — all on **CPU**, labelled as such everywhere. No GPU exists on this
-> machine, so there is no GPU number anywhere. See [Roadmap](#roadmap).
+> **Status: ~100% of what this machine can host.** Instrumentation, the ladder,
+> repeats-and-report, committed profiler traces, **weak and strong DDP scaling
+> studies executed across real processes**, an **ablation that refuted its own
+> hypothesis**, a **cost-to-target-accuracy study**, and a **CPU-pinning
+> experiment that had to validate its own instrument first** are done — all on
+> **CPU**, labelled as such everywhere. No GPU exists here, so there is no GPU
+> number anywhere, and `torch.compile` genuinely fails on this box. See
+> [Roadmap](#roadmap).
 
 ## DDP scaling, actually executed — weak and strong
 
@@ -179,7 +182,114 @@ ledger into a cost-to-target table and a break-even for scaling, but the rate is
 a required input rather than a hard-coded constant, because published on-demand
 prices are not what anyone's bill actually says.
 
-## Roadmap (the remaining ~60%)
+## Cost to a target *accuracy* — the question the ladder cannot answer
+
+Every number in the optimisation ladder is samples per second. That is right for
+*"is the training loop efficient?"* and wrong for the question anyone pays for,
+which is *"what does it cost to get a model this good?"*
+
+    cost to target = samples_to_target / samples_per_second x rate
+
+**Both factors.** The ladder measures only the denominator, so it is structurally
+blind to any change that moves throughput and convergence in opposite directions —
+and so is every "we got a 2x speedup" measured the same way.
+
+`make accuracy` trains each configuration until held-out accuracy crosses 85% on
+two consecutive evaluations, at $0.35/hour:
+
+| config | samples/s | steps to target | samples to target | $ to target | rank by throughput | rank by cost |
+|---|---|---|---|---|---|---|
+| batch64 | 106.0 | 187.5 | 12,000 | **$0.0110** | 1 | 1 |
+| batch256_linear | 83.0 | 137.5 | 35,200 | $0.0412 | **2** | **4** |
+| batch128_linear | 71.2 | 162.5 | 20,800 | $0.0284 | 3 | 3 |
+| batch128_unscaled | 68.2 | 137.5 | 17,600 | $0.0251 | 4 | 2 |
+| batch128_bf16 | 31.7 | 162.5 | 20,800 | $0.0639 | 5 | 5 |
+
+**The winners agree and the orderings do not.** `batch256_linear` is the
+second-fastest configuration and the second-most-expensive route to the target —
+a throughput ladder promotes it while it costs **3.75x** the cheapest path to the
+same accuracy. Across the table the spread is **5.8x**, and none of it is visible
+in samples/s.
+
+The mechanism is clean and it is exactly the textbook one: bigger batches **did**
+cut the number of updates needed (187.5 → 137.5 steps) and raised the number of
+*samples* 2.9x doing it. On CPU the throughput gain never arrived to compensate.
+
+### A reporting bug this had first
+
+The first version compared only `rank_by_throughput[0]` against
+`rank_by_cost[0]`, found them equal, and printed *"the throughput winner is also
+the cheapest here"*. True, and it buried the finding: a ladder does not just pick
+a winner, it **ranks every rung**, and the result lives entirely in the rungs that
+move. The comparison now covers full orderings and names the configuration
+throughput over-rates — the one a ladder would promote and a budget would not.
+
+## CPU pinning: the experiment that had to validate its own instrument
+
+The ladder's biggest win was `num_workers=4`. On an 8-core box that leaves the
+main process sharing all 8 cores with 4 decode workers — everybody oversubscribed,
+threads migrating, caches thrown away. Does partitioning the cores beat sharing
+them, even though partitioning gives each side strictly fewer?
+
+Four arms, because `pinned_split` bundles *two* interventions and an experiment
+that cannot separate its own interventions has measured neither:
+
+| arm | main | workers | threads | samples/s (median of 7) | range |
+|---|---|---|---|---|---|
+| `default` | all | all | default | 87.8 | 79.2–105.2 |
+| `threads_capped` | all | all | 4 | 99.5 | 65.3–129.0 |
+| `pinned_split` | 0–3 | 4–7 | 4 | **140.6** | 129.4–146.3 |
+| `pinned_half_shared` | 0–3 | 0–3 | 4 | 132.5 | 113.9–138.5 |
+
+**Pinning is worth +41.3%**, an effect 3.5x the measured noise floor.
+
+**The mechanism is not the one predicted.** `pinned_half_shared` puts both sides
+on the *same* four cores — same core count, shared instead of disjoint — and
+captures nearly all of the gain. Disjointness is worth a further +6.1%, which is
+*inside* the noise floor and not separable. So what helps is confining the
+training process to four cores **at all**; whether the dataloader gets its own
+four is not established. Without that fourth arm the obvious reading of "+41.3%"
+is "partitioning removed contention", and this data does not support it.
+
+### The calibration arm did more work than the experiment
+
+PyTorch already defaults to **4 threads** here — 8 logical cores, 4 physical — so
+`threads_capped` is a no-op, and `default` and `threads_capped` are **the same
+configuration measured twice**. That accident is the most useful thing in the
+table, twice over.
+
+**It measures the noise floor.** The gap between two identical configurations is
+not an effect, it is error: **11.8%** at 7 repeats. Every other number has to
+clear it, and the disjointness result does not.
+
+**It validates the separability test itself.** At **3 repeats** those two
+identical arms came out *non-overlapping* — 48.9–67.0 against 81.9–92.5. So
+non-overlap did **not** imply a real effect: the test scored a false positive on
+the one chance it was given, and every `separable` flag in that run was unsound.
+Two 3-repeat runs duly disagreed on the **sign** of every effect — disjointness
+was +8.4% and "separable" in one, −15.2% and not in the next.
+
+So the module computes `separability_test_valid` and **refuses to issue a verdict
+when the calibration arms fail their own overlap check**. At 3 repeats it reports
+NO CONCLUSION; at 7 the arms overlap as they must and the verdicts become
+readable. The precondition is checkable *before* the result is read, which is the
+whole point — otherwise the 3-repeat run would have shipped whichever sign it
+happened to produce, with a confident range test behind it.
+
+### Two bugs found by running it
+
+* **`worker_init_fn` was a closure**, and the docstring justified that choice on
+  the grounds that it runs in the worker *process* under spawn. The reasoning was
+  right and the conclusion backwards: spawn **pickles** the init function to reach
+  the child, and a local function is not picklable. It failed instantly with
+  `PicklingError: Can't pickle local object`. It is a module-level class now.
+* **The dataloader kwargs were unguarded for `num_workers=0`.** Torch raises on
+  `prefetch_factor` there rather than ignoring it. The study never runs with zero
+  workers — contention is the whole point — so it only fired under test, which is
+  precisely where an unguarded version would have sat unnoticed until someone
+  reused the helper.
+
+## Roadmap
 
 | Milestone | Status |
 |---|---|
@@ -198,19 +308,45 @@ prices are not what anyone's bill actually says.
 | Strong-scaling counterpart (global batch fixed) | done |
 | Comm fraction repeated and reported with its spread | done |
 | **`torch.compile` rung** | fails on this box: no MSVC toolchain (in the ledger) |
-| **Cost-to-target-ACCURACY table (this study measures throughput only)** | not done |
-| **CPU-pinning experiment to test core oversubscription** | named, not run |
+| Cost-to-target-accuracy: throughput and cost rank the rungs differently | done |
+| CPU-pinning experiment, with a calibration arm that validates its own test | done |
+| **A quiet dedicated machine to shrink the 11.8% noise floor** | not available here |
 
 ## Honesty notes
 
-* **Every measured number in this repo is CPU.** `torch` here is `2.11.0+cpu` and
-  `torch.cuda.is_available()` is `False`. No GPU number is quoted anywhere.
-* **There is no scaling efficiency number.** `ddp.py` is written, documents its
-  measurement protocol, and declares weak-vs-strong scaling up front, but it has
-  not been executed on multiple devices. An unrun harness produces no result, and
-  inventing "87%" here would be precisely the failure this project is about.
+* **Every measured number in this repo is CPU.** `torch.cuda.is_available()` is
+  `False` and no GPU number is quoted anywhere.
+* **Two torch versions are represented.** The ladder, the traces and the scaling
+  studies were measured on `2.11.0+cpu`; the cost-to-accuracy and CPU-pinning
+  studies on `2.13.0+cpu`, because the toolchain moved underneath this repo
+  mid-build. Each result file records its own version. Nothing is compared
+  *across* that boundary, and the two are not silently pooled into one table.
+* **The scaling numbers are CPU/gloo across real OS processes**, not GPUs across
+  NVLink. They are executed rather than projected, and the efficiency figures
+  (100% / 80% / 59%) belong to this interconnect. The *shape* — efficiency
+  falling as the comm fraction grows — is what transfers; the percentages are not
+  a prediction about NCCL.
+  (An earlier version of this note said there was no scaling number at all. That
+  was true when it was written and stopped being true when the study ran, and a
+  stale honesty note is worse than none: it is a false claim in the section whose
+  whole job is not making them.)
 * The `+compile` rung genuinely fails on this machine (`InductorError: Compiler:
   cl is not found`) because Inductor's CPU backend needs MSVC. That is in the
   ledger as a failed row with the error, not omitted.
+* **Absolute throughput here moved by more than 2x between sessions.**
+  `pinned_split` measured 63.8 samples/s while this laptop was carrying unrelated
+  work at 100% CPU and 140.6 on a quiet one. Only within-session comparisons carry
+  weight, which is why every arm is re-run inside each invocation rather than
+  compared against a stored baseline.
+* **`separable_from_control` is thinner than the effect size suggests**: 129.4
+  against 129.0 is a margin of 0.4 samples/s. The claim that pinning helps rests
+  on the effect being 3.5x the noise floor, not on that hair-width range test.
+* **The cost-to-accuracy task is synthetic**, so its convergence shape belongs to
+  the generator. What transfers is that the two rankings can disagree and that
+  only measuring both catches it — not the crossover point.
+* **Stopping resolution differs across batch sizes.** Accuracy is evaluated every
+  25 steps, so `samples_to_target` is quantised to 1,600 samples at batch 64 and
+  6,400 at batch 256 — up to 18% of that row. It does not explain a 2.9x gap, and
+  it is a real bias in the large-batch direction.
 * Absolute throughput is meaningless outside this synthetic workload. The rung
   *order* is the transferable result; the rung *values* are not.
