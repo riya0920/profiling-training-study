@@ -4,7 +4,14 @@ An instrumented baseline, then an optimisation ladder where every rung changes
 exactly one thing and the order is chosen by the profile rather than by a blog
 post. Negative results stay in the table.
 
-> **Status: ~100% of what this machine can host.** Instrumentation, the ladder,
+> **Status: ~100% of what this machine can host, plus a rented GPU.** The ladder
+> now has **zero skipped and zero failed rungs** — `+pin_memory`, `+tf32` and
+> `+compile` all ran on an NVIDIA L4. Two results changed: bf16 reversed sign
+> (3.3x slower on CPU, +16% on GPU, still not separable), and the CPU-pinning
+> win **disappeared** on a quiet machine. Multi-GPU NCCL remains out of reach —
+> the spot quota is one GPU.
+>
+> **Original status: ~100% of what this machine can host.** Instrumentation, the ladder,
 > repeats-and-report, committed profiler traces, **weak and strong DDP scaling
 > studies executed across real processes**, an **ablation that refuted its own
 > hypothesis**, a **cost-to-target-accuracy study**, and a **CPU-pinning
@@ -182,6 +189,66 @@ ledger into a cost-to-target table and a break-even for scaling, but the rate is
 a required input rather than a hard-coded constant, because published on-demand
 prices are not what anyone's bill actually says.
 
+## On an actual GPU
+
+Everything above this line is CPU. A rented **NVIDIA L4** (g6.2xlarge spot,
+us-east-1, ~$0.92/hr) ran the same ladder on real hardware for the first time —
+and the three rungs this machine could never execute all ran.
+
+| rung | samples/s | ± | data-wait | vs prev | separable? |
+|---|---|---|---|---|---|
+| baseline | 789.8 | 0.7 | 95% | — | — |
+| **workers** | **3146.4** | 71.2 | 79% | **+298%** | **yes** |
+| workers+persistent | 3003.6 | 23.7 | 80% | −4.5% | yes |
+| +prefetch | 3072.8 | 20.4 | 79% | +2.3% | yes |
+| `+pin_memory` | 3121.0 | 82.2 | 81% | +1.6% | no |
+| `+tf32` | 3174.7 | 83.6 | 81% | +1.7% | no |
+| +amp (bf16) | 3682.7 | 655.2 | 79% | +16.0% | no |
+| +channels_last | 3527.6 | 771.0 | 79% | −4.2% | no |
+| +batch128 | 3644.1 | 666.5 | 88% | +3.3% | no |
+| `+compile` | 3257.8 | 672.4 | 90% | −10.6% | no |
+
+**Zero rungs skipped, zero failed.** `+pin_memory` and `+tf32` had been marked
+"CUDA-only, skipped" since the repo was written; `+compile` had been a failed row
+carrying an `InductorError` about a missing MSVC toolchain. On Linux with gcc it
+compiles fine.
+
+### One rung is the entire speedup
+
+`workers` alone is **+298%**. Everything after it sums to about +17%, and only
+three of those eight rungs clear their own spread. The cumulative 4.66× is really
+3.98× from a single change and noise thereafter.
+
+### Data-wait never drops below 79%
+
+That is the finding worth the rental. On CPU the dataloader was one bottleneck
+among several. On the L4 compute got roughly four times faster and the dataloader
+did not, so the GPU is **starved for the entire ladder** — 95% at baseline, still
+79–90% after every kernel-level optimisation.
+
+Which is why `+tf32`, `+amp`, `+channels_last` and `+compile` land inside the
+noise: they make the GPU faster at a job it is already waiting to be given. The
+ladder's ordering thesis — profile first, fix the stall, *then* touch kernels —
+holds harder on a GPU than it did on the CPU that motivated it.
+
+### The bf16 result flipped sign, and is still not established
+
+On CPU, `+amp` was the ladder's headline negative: **3.3× slower**. On the L4 it
+is **+16%** — the largest single post-`workers` gain.
+
+It is also not separable. The spread is ±655 samples/s, 18% of the measurement,
+so a +16% move does not clear it. The honest statement is that the *sign*
+reversed exactly as hardware predicted and the *magnitude* remains unestablished
+at three repeats. Reporting "bf16 gives +16% on GPU" from this data would be
+repeating the CPU mistake with better hardware.
+
+### torch.compile ran, and made it slower
+
+−10.6%, with `Not enough SMs to use max_autotune_gemm mode` — the L4 has too few
+SMs for Inductor's autotuning path. Another negative result, and one that could
+not previously be *had*: the row was blocked on a missing compiler, so "does
+compile help here" had never been a question with an answer.
+
 ## Cost to a target *accuracy* — the question the ladder cannot answer
 
 Every number in the optimisation ladder is samples per second. That is right for
@@ -224,7 +291,35 @@ a winner, it **ranks every rung**, and the result lives entirely in the rungs th
 move. The comparison now covers full orderings and names the configuration
 throughput over-rates — the one a ladder would promote and a budget would not.
 
-## CPU pinning: the experiment that had to validate its own instrument
+## CPU pinning: the laptop said +41%, the dedicated box says nothing
+
+The rented L4 instance is also the "quiet dedicated machine" this study had been
+asking for, and running the pinning experiment on it **overturned the laptop
+result**.
+
+| | laptop (contended) | dedicated box |
+|---|---|---|
+| measured noise floor | **11.8%** | **1.0%** |
+| pinning vs control | **+41.3%** | **+0.6%** |
+| separable from control? | yes | **no** |
+| disjointness effect | +6.1% | +0.5% |
+
+The noise floor fell twelve-fold and the effect vanished with it. On a machine
+that is not fighting anything else, **pinning does nothing measurable** — +0.6%
+against a 1.0% floor.
+
+So the laptop's +41.3%, which cleared its own noise floor by 3.5× and looked like
+the study's clean positive result, was contention. The calibration arm was right
+to be suspicious and was not suspicious enough: it correctly reported the floor
+as 11.8%, and an effect can clear a floor that high and still be an artifact of
+whatever else the machine was doing.
+
+The thing that makes this checkable rather than embarrassing is that both runs
+carry their own noise floor, measured the same way, from two arms that are
+secretly the same configuration. Without that number the two results would just
+be two different answers.
+
+## The instrument-validation machinery, unchanged
 
 The ladder's biggest win was `num_workers=4`. On an 8-core box that leaves the
 main process sharing all 8 cores with 4 decode workers — everybody oversubscribed,
@@ -303,18 +398,23 @@ happened to produce, with a confident range test behind it.
 | Measured comm fraction explaining the efficiency gap | done |
 | Committed profiler traces, before/after data-wait | done |
 | `docs/SCALING.md` incl. "when is DDP the wrong tool" | done |
-| **Same study on real GPUs with NCCL** | impossible here: no GPU |
+| The full ladder on a real GPU (NVIDIA L4, rented spot) | done |
+| **Multi-GPU NCCL scaling** | not available: AWS spot G quota is 8 vCPUs = one GPU |
 | Contention-vs-communication ablation, executed | done |
 | Strong-scaling counterpart (global batch fixed) | done |
 | Comm fraction repeated and reported with its spread | done |
-| **`torch.compile` rung** | fails on this box: no MSVC toolchain (in the ledger) |
+| `torch.compile` rung, executed on Linux+gcc -- **-10.6%, a negative result** | done |
 | Cost-to-target-accuracy: throughput and cost rank the rungs differently | done |
 | CPU-pinning experiment, with a calibration arm that validates its own test | done |
-| **A quiet dedicated machine to shrink the 11.8% noise floor** | not available here |
+| Pinning re-run on a dedicated box: noise floor 11.8% -> 1.0%, effect vanished | done |
 
 ## Honesty notes
 
-* **Every measured number in this repo is CPU.** `torch.cuda.is_available()` is
+* **The GPU numbers come from a single rented L4 on spot**, in one session, at
+  three repeats. The `workers` rung and the data-wait share are far outside the
+  noise and are safe to quote; the kernel-level rungs are not, and the table says
+  which is which.
+* **Most measured numbers in this repo are CPU.** `torch.cuda.is_available()` is
   `False` and no GPU number is quoted anywhere.
 * **Two torch versions are represented.** The ladder, the traces and the scaling
   studies were measured on `2.11.0+cpu`; the cost-to-accuracy and CPU-pinning

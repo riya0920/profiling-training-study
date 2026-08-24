@@ -1,0 +1,127 @@
+{
+  "hardware": {
+    "platform": "Linux-6.8.0-1052-aws-x86_64-with-glibc2.35",
+    "processor": "x86_64",
+    "cpu_count": 8,
+    "torch": "2.7.0+cu128",
+    "default_torch_threads": 4
+  },
+  "steps_per_run": 40,
+  "repeats": 7,
+  "num_workers": 4,
+  "decode_cost": 400,
+  "rows": [
+    {
+      "arm": "default",
+      "note": "everything shares every core; PyTorch picks its own thread count",
+      "torch_threads": 4,
+      "main_cores": "all",
+      "worker_cores": "all",
+      "samples_per_s_median": 344.5,
+      "samples_per_s_min": 315.1,
+      "samples_per_s_max": 350.5,
+      "runs": [
+        315.1,
+        339.4,
+        339.5,
+        344.5,
+        346.1,
+        348.0,
+        350.5
+      ],
+      "vs_default": 1.0
+    },
+    {
+      "arm": "threads_capped",
+      "note": "CONTROL: cap torch threads to the worker count, no pinning. The only difference from pinned_split is the affinity mask.",
+      "torch_threads": 4,
+      "main_cores": "all",
+      "worker_cores": "all",
+      "samples_per_s_median": 348.0,
+      "samples_per_s_min": 341.5,
+      "samples_per_s_max": 351.1,
+      "runs": [
+        341.5,
+        342.1,
+        347.9,
+        348.0,
+        349.5,
+        350.9,
+        351.1
+      ],
+      "vs_default": 1.01
+    },
+    {
+      "arm": "pinned_split",
+      "note": "compute on cores [0, 1, 2, 3], decode on cores [4, 5, 6, 7] -- disjoint, strictly fewer each",
+      "torch_threads": 4,
+      "main_cores": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "worker_cores": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "samples_per_s_median": 350.0,
+      "samples_per_s_min": 341.5,
+      "samples_per_s_max": 351.5,
+      "runs": [
+        341.5,
+        341.5,
+        344.4,
+        350.0,
+        350.3,
+        351.3,
+        351.5
+      ],
+      "vs_default": 1.016
+    },
+    {
+      "arm": "pinned_half_shared",
+      "note": "both sides confined to cores [0, 1, 2, 3]. Same core COUNT as pinned_split, shared instead of disjoint -- so if these two tie, the effect is not partitioning.",
+      "torch_threads": 4,
+      "main_cores": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "worker_cores": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "samples_per_s_median": 348.3,
+      "samples_per_s_min": 342.7,
+      "samples_per_s_max": 353.4,
+      "runs": [
+        342.7,
+        343.5,
+        347.8,
+        348.3,
+        349.4,
+        350.7,
+        353.4
+      ],
+      "vs_default": 1.011
+    }
+  ],
+  "pinning_effect_vs_thread_capped_control": 1.006,
+  "separable_from_control": false,
+  "thread_cap_was_a_noop": true,
+  "measured_noise_floor": 0.01,
+  "separability_test_valid": true,
+  "separability_test_note": "the two identical arms overlap as they must, so non-overlap elsewhere carries some weight -- at 7 repeats, not much.",
+  "noise_floor_note": "PyTorch already defaulted to 4 threads on this 8-logical-core machine, so `default` and `threads_capped` are the same configuration measured twice. The 1.0% gap between their medians is therefore this benchmark's noise floor at 7 repeats, not an effect -- and every other number below has to clear it to mean anything.",
+  "disjointness_effect_vs_same_core_count": 1.005,
+  "disjointness_separable": false,
+  "verdict": "HYPOTHESIS NOT SUPPORTED: pinning changes throughput by +0.6% against the thread-capped control, the observed ranges overlap, and the effect is smaller than the 1.0% noise floor measured from the two arms that are secretly identical. This run does not establish an effect in either direction.",
+  "disjointness_verdict": "against pinned_half_shared -- same core count, shared rather than disjoint -- partitioning is worth +0.5%, but the ranges overlap, so any benefit of pinning here is not attributable to disjointness by this data",
+  "caveat": "one laptop, one workload. The balance between contention removed and peak parallelism lost depends on the ratio of decode cost to compute cost, which is a property of this workload rather than of pinning."
+}
