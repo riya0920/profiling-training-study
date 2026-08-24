@@ -291,6 +291,68 @@ a winner, it **ranks every rung**, and the result lives entirely in the rungs th
 move. The comparison now covers full orderings and names the configuration
 throughput over-rates — the one a ladder would promote and a budget would not.
 
+### Cost to accuracy: the CPU agreed with throughput, the GPU does not
+
+The rented L4 also re-ran the cost-to-accuracy study — at the **actual price
+paid**, $0.9221/hr — and it is the sharpest version of this repo's argument.
+
+Same target (0.85), same step cap, same repeats. Only the device changed.
+
+| config | samples/s | rank by throughput | samples to target | $ to target | rank by cost |
+|---|---|---|---|---|---|
+| batch64 | 8795.3 | 4th | 12,000 | **$0.000349** | **1st** |
+| batch128_bf16 | **11968.0** | **1st** | 22,400 | $0.000479 | 2nd |
+| batch128_unscaled | 9153.5 | 3rd | 17,600 | $0.000492 | 3rd |
+| batch128_linear | 9297.4 | 2nd | 20,800 | $0.000573 | 4th |
+| batch256_linear | 7303.0 | 5th | 35,200 | $0.001235 | 5th |
+
+`winners_agree: false`. **`batch64` is fourth of five by throughput and first by
+cost** — it moves three places. The dearest configuration costs **3.5x** the
+cheapest, and none of that spread is visible in samples/s.
+
+On the CPU run, `winners_agree` was **true**: `batch64` was both the fastest and
+the cheapest, so throughput was a perfectly adequate proxy and the study had
+nothing to say. The inversion is not a property of the code. It is a property of
+the hardware the code runs on.
+
+The mechanism is visible in the two middle columns. `samples_to_target` is almost
+identical on both devices — 12,000 / 17,600 / 20,800 / 35,200, differing only for
+bf16 — because how many samples an optimiser needs to reach an accuracy is a
+property of the optimisation, not of the chip. Throughput is the opposite: it
+reordered completely. Cost is one divided by the other, so on a device where
+throughput happens to agree with sample-efficiency you can measure the wrong
+thing and be right anyway.
+
+That is the failure mode worth naming: **throughput was not a bad proxy on the
+CPU, it was a lucky one**, and nothing in a samples/s dashboard tells you which
+of the two you are currently enjoying.
+
+bf16 makes it concrete. It is the fastest configuration on the L4 by 36% over
+`batch64` — and 37% more expensive to get to the same accuracy, because it needs
+22,400 samples instead of 12,000. Buying throughput and paying it back in extra
+samples is invisible to every metric except this one.
+
+### Two bugs the GPU run found in the study itself
+
+Running this on an accelerator for the first time exposed two defects that CPU
+execution structurally could not:
+
+* **The device was hardcoded to `cpu`.** A study whose unit is dollars-per-hour
+  of a machine could never be run on the machine that costs money. It silently
+  measured vCPUs for fourteen minutes on a rented GPU before `nvidia-smi` showed
+  0% utilisation.
+* **No `torch.cuda.synchronize()`.** CUDA kernels are asynchronous:
+  `perf_counter()` after `backward()` returns once the work is *queued*, not once
+  it is done. Every timing would have measured launch overhead and reported it as
+  compute. This is the same shape as trusting Kafka's `flush()` to mean the
+  writes landed — an async boundary read as if it were synchronous — and it is
+  the kind of bug that makes a benchmark faster and wronger at once.
+
+Both are fixed, and the result above is post-fix. The first bug is embarrassing;
+the second is the one that would have produced confident, publishable, wrong
+numbers.
+
+
 ## CPU pinning: the laptop said +41%, the dedicated box says nothing
 
 The rented L4 instance is also the "quiet dedicated machine" this study had been
@@ -407,6 +469,7 @@ happened to produce, with a confident range test behind it.
 | Cost-to-target-accuracy: throughput and cost rank the rungs differently | done |
 | CPU-pinning experiment, with a calibration arm that validates its own test | done |
 | Pinning re-run on a dedicated box: noise floor 11.8% -> 1.0%, effect vanished | done |
+| Cost-to-accuracy on the L4: throughput and cost disagree, `batch64` moves 4th -> 1st | done |
 
 ## Honesty notes
 

@@ -154,6 +154,8 @@ def train_to_target(cfg: AccConfig, target: float, device, train_n: int = 4000,
         loss.backward()
         opt.step()
         sched.step()
+        if device.type == "cuda":
+            torch.cuda.synchronize()
         train_s += time.perf_counter() - t0
 
         step += 1
@@ -162,6 +164,8 @@ def train_to_target(cfg: AccConfig, target: float, device, train_n: int = 4000,
         if step % eval_every == 0:
             te = time.perf_counter()
             acc = evaluate(model, val_loader, device)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
             eval_s += time.perf_counter() - te
             curve.append({"step": step, "samples": samples, "val_acc": acc})
             hits = hits + 1 if acc >= target else 0
@@ -228,7 +232,7 @@ def _reading(winners_agree, orders_identical, by_throughput, by_cost, biggest,
 
 def run(target: float = 0.85, rate_usd_per_hour: float = 0.35, repeats: int = 2,
         max_steps: int = 900, train_n: int = 4000, decode_cost: int = 120) -> dict:
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rows = []
     for cfg in CONFIGS:
         reps = [train_to_target(cfg, target, device, train_n=train_n, decode_cost=decode_cost,
@@ -301,7 +305,10 @@ def run(target: float = 0.85, rate_usd_per_hour: float = 0.35, repeats: int = 2,
     return {
         "hardware": {"platform": platform.platform(),
                      "processor": platform.processor() or platform.machine(),
-                     "cpu_count": os.cpu_count(), "torch": torch.__version__},
+                     "cpu_count": os.cpu_count(), "torch": torch.__version__,
+                     "device": device.type,
+                     "accelerator": (torch.cuda.get_device_name(0)
+                                     if device.type == "cuda" else None)},
         "target_val_accuracy": target,
         "rate_usd_per_hour": rate_usd_per_hour,
         "repeats": repeats,

@@ -1,0 +1,127 @@
+{
+  "hardware": {
+    "platform": "Linux-6.8.0-1052-aws-x86_64-with-glibc2.35",
+    "processor": "x86_64",
+    "cpu_count": 8,
+    "torch": "2.7.0+cu128",
+    "device": "cuda",
+    "accelerator": "NVIDIA L4"
+  },
+  "target_val_accuracy": 0.85,
+  "rate_usd_per_hour": 0.9221,
+  "repeats": 2,
+  "max_steps": 600,
+  "rows": [
+    {
+      "name": "batch64",
+      "note": "the ladder's converged dataloader settings, fp32",
+      "reached": 2,
+      "of": 2,
+      "samples_per_s": 8795.3,
+      "samples_to_target": 12000.0,
+      "steps_to_target": 187.5,
+      "hours_to_target": 0.00037899241547104595,
+      "usd_to_target": 0.00034946890630585146,
+      "final_val_acc": 0.873
+    },
+    {
+      "name": "batch128_linear",
+      "note": "batch doubled WITH the pre-declared linear LR rule",
+      "reached": 2,
+      "of": 2,
+      "samples_per_s": 9297.4,
+      "samples_to_target": 20800.0,
+      "steps_to_target": 162.5,
+      "hours_to_target": 0.0006214425102638741,
+      "usd_to_target": 0.0005730321387143183,
+      "final_val_acc": 0.958
+    },
+    {
+      "name": "batch128_unscaled",
+      "note": "the control: batch doubled and LR left alone, which is the mistake",
+      "reached": 2,
+      "of": 2,
+      "samples_per_s": 9153.5,
+      "samples_to_target": 17600.0,
+      "steps_to_target": 137.5,
+      "hours_to_target": 0.0005341030749202499,
+      "usd_to_target": 0.0004924964453839624,
+      "final_val_acc": 0.943
+    },
+    {
+      "name": "batch256_linear",
+      "note": "pushing the batch far enough that the trade should be visible",
+      "reached": 2,
+      "of": 2,
+      "samples_per_s": 7303.0,
+      "samples_to_target": 35200.0,
+      "steps_to_target": 137.5,
+      "hours_to_target": 0.0013388748973301935,
+      "usd_to_target": 0.0012345765428281716,
+      "final_val_acc": 0.972
+    },
+    {
+      "name": "batch128_bf16",
+      "note": "does reduced precision cost convergence as well as throughput?",
+      "reached": 2,
+      "of": 2,
+      "samples_per_s": 11968.0,
+      "samples_to_target": 22400.0,
+      "steps_to_target": 175.0,
+      "hours_to_target": 0.0005199067755638869,
+      "usd_to_target": 0.0004794060377474601,
+      "final_val_acc": 0.981
+    }
+  ],
+  "rank_by_throughput": [
+    "batch128_bf16",
+    "batch128_linear",
+    "batch128_unscaled",
+    "batch64",
+    "batch256_linear"
+  ],
+  "rank_by_cost_to_target": [
+    "batch64",
+    "batch128_bf16",
+    "batch128_unscaled",
+    "batch128_linear",
+    "batch256_linear"
+  ],
+  "winners_agree": false,
+  "orderings_identical": false,
+  "rank_changes": [
+    {
+      "name": "batch64",
+      "rank_by_throughput": 4,
+      "rank_by_cost": 1,
+      "moved": -3
+    },
+    {
+      "name": "batch128_linear",
+      "rank_by_throughput": 2,
+      "rank_by_cost": 4,
+      "moved": 2
+    },
+    {
+      "name": "batch128_bf16",
+      "rank_by_throughput": 1,
+      "rank_by_cost": 2,
+      "moved": 1
+    },
+    {
+      "name": "batch128_unscaled",
+      "rank_by_throughput": 3,
+      "rank_by_cost": 3,
+      "moved": 0
+    },
+    {
+      "name": "batch256_linear",
+      "rank_by_throughput": 5,
+      "rank_by_cost": 5,
+      "moved": 0
+    }
+  ],
+  "cost_spread_dearest_over_cheapest": 3.53,
+  "reading": "the throughput winner (batch128_bf16) is NOT the cheapest way to reach the target (batch64). A ladder measured in samples/s would have shipped the wrong configuration.",
+  "caveat": "synthetic task on CPU. The convergence shape belongs to this generator, so the crossover point does not transfer -- what transfers is that the two rankings can disagree, and that only measuring both catches it."
+}
