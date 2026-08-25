@@ -31,16 +31,16 @@ so before any time is spent on it.
 
 | rung | samples/s (mean ± std) | Δ vs prev | cumulative | data % | fwd % | bwd % | opt % | note |
 |---|---|---|---|---|---|---|---|---|
-| baseline | 75.2 ± 17.2 | — | 1.00x | 37 | 26 | 36 | 1 | instrumented FP32 reference, single-process loading |
+| baseline | 75.2 ± 17.2 | - | 1.00x | 37 | 26 | 36 | 1 | instrumented FP32 reference, single-process loading |
 | workers | 116.3 ± 18.1 | +55% | 1.55x | 0 | 44 | 55 | 1 | attack the profiled data-wait stall |
 | workers+persistent | 144.5 ± 5.6 | +24% | 1.92x | 0 | 42 | 58 | 0 | stop paying worker startup every epoch |
 | +prefetch | 143.7 ± 1.1 | -1% | 1.91x | 0 | 42 | 57 | 0 | deeper queue to absorb jitter in per-sample cost |
-| +pin_memory | _skipped_ | — | — | — | — | — | — | CUDA-only rung; no effect on cpu |
-| +tf32 | _skipped_ | — | — | — | — | — | — | CUDA-only rung; no effect on cpu |
+| +pin_memory | _skipped_ | - | - | - | - | - | - | CUDA-only rung; no effect on cpu |
+| +tf32 | _skipped_ | - | - | - | - | - | - | CUDA-only rung; no effect on cpu |
 | +amp | 58.9 ± 4.6 | -59% | 0.78x | 0 | 34 | 65 | 0 | mixed precision; bf16 chosen over fp16, see REPORT |
 | +channels_last | 64.9 ± 3.6 | +10% | 0.86x | 0 | 32 | 68 | 0 | NHWC layout for conv kernels |
 | +batch128 | 61.4 ± 6.6 | -5% | 0.82x | 0 | 31 | 68 | 0 | batch doubled WITH the pre-declared linear LR rule + warmup |
-| +compile | _failed_ | — | — | — | — | — | — | InductorError |
+| +compile | _failed_ | - | - | - | - | - | - | InductorError |
 
 ![ladder_throughput.png](results/figures/ladder_throughput.png)
 ![ladder_breakdown.png](results/figures/ladder_breakdown.png)

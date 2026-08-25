@@ -1,4 +1,4 @@
-# DDP scaling study (CPU / gloo) — and a measurement that refused to cooperate
+# DDP scaling study (CPU / gloo) - and a measurement that refused to cooperate
 
 Produced by `python -m trainlab.scaling`. Raw data in `results/`.
 
@@ -8,7 +8,7 @@ This machine has **no GPU**. The study runs DistributedDataParallel over the
 **gloo** backend across real OS processes on CPU: separate processes, real
 gradient all-reduce, real barriers. Every number is labelled CPU/gloo.
 
-**Transfers to a GPU cluster:** the method — weak *and* strong scaling run
+**Transfers to a GPU cluster:** the method - weak *and* strong scaling run
 separately, an LR rule fixed before the runs, warmup excluded, three
 non-overlapping measurement windows, an ablation to test the explanation, and a
 comm-fraction measurement reported with its spread.
@@ -29,8 +29,8 @@ NVLink, and CPU workers contend for the very cores the all-reduce runs on.
 ### A bug the strong-scaling run exposed
 
 The LR was being scaled against the **per-worker** batch. Under weak scaling
-those coincide, so it was right by accident. Under strong scaling — global batch
-held at 128 — it printed `lr 0.01 → 0.02 → 0.04` while the global batch never
+those coincide, so it was right by accident. Under strong scaling - global batch
+held at 128 - it printed `lr 0.01 → 0.02 → 0.04` while the global batch never
 changed. That is a hyperparameter change wearing a scaling study's clothes, and
 it would have made the strong-scaling curve meaningless.
 
@@ -94,12 +94,12 @@ the in-process data decode. The ablation is one command: rerun world 4 with
 | decode_cost = 60 (normal) | 59% ± 13.9 |
 | **decode_cost = 0 (ablation)** | **65% ± 0.9** |
 
-Removing *all* CPU-side data work recovers about 6 percentage points — and the
+Removing *all* CPU-side data work recovers about 6 percentage points - and the
 two figures overlap within the ±13.9 spread of the baseline. **Decode contention
 is not the dominant term either.**
 
 So both candidate explanations have now been tested and neither accounts for the
-~35–41% loss at four workers. What remains, untested:
+~35-41% loss at four workers. What remains, untested:
 
 * **Core oversubscription.** Four training processes plus gloo's collective
   threads on 8 logical / 4 physical cores. Testing this needs either fewer
@@ -128,7 +128,7 @@ was measured last.** The next experiment is stated rather than the conclusion.
 
 `python -m trainlab.cost --ledger results/ladder_cpu.json --rate 0.35` converts a
 ledger into a cost-to-target table and a scaling break-even. This study's direct
-compute cost was **$0** — local hardware — so the rate is a required input rather
+compute cost was **$0** - local hardware - so the rate is a required input rather
 than a constant. At the measured efficiencies, four rented workers would cost 4x
 for 2.4x the throughput: a bad trade unless wall-clock is worth more than 1.7x
 the money.

@@ -28,10 +28,10 @@ def ladder_table(ledger: dict) -> str:
     ]
     for r in rows:
         if r.get("skipped"):
-            lines.append("| %s | _skipped_ | — | — | — | — | — | — | %s |" % (r["run"], r["reason"]))
+            lines.append("| %s | _skipped_ | - | - | - | - | - | - | %s |" % (r["run"], r["reason"]))
             continue
         if r.get("failed"):
-            lines.append("| %s | _failed_ | — | — | — | — | — | — | %s |" % (r["run"], r["error"].split(":")[0]))
+            lines.append("| %s | _failed_ | - | - | - | - | - | - | %s |" % (r["run"], r["error"].split(":")[0]))
             continue
         lines.append(
             "| %s | %.1f ± %.1f | %s | %.2fx | %.0f | %.0f | %.0f | %.0f | %s |"
@@ -39,7 +39,7 @@ def ladder_table(ledger: dict) -> str:
                 r["run"],
                 r["samples_per_s"],
                 r.get("samples_per_s_std", 0.0),
-                ("%+.0f%%" % (100 * (r["step_speedup"] - 1))) if "step_speedup" in r else "—",
+                ("%+.0f%%" % (100 * (r["step_speedup"] - 1))) if "step_speedup" in r else " - ",
                 r.get("cumulative_speedup", 1.0),
                 r["data_pct"],
                 r["forward_pct"],

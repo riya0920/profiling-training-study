@@ -1,31 +1,20 @@
 # Profiling-Driven Training Optimisation Study
 
+![tests](https://img.shields.io/badge/tests-32%20passing-1a7a56) [![demo](https://img.shields.io/badge/demo-live-1d4e7c)](https://riya0920.github.io/profiling-training-study/) ![license](https://img.shields.io/badge/license-MIT-555555)
+
 An instrumented baseline, then an optimisation ladder where every rung changes
 exactly one thing and the order is chosen by the profile rather than by a blog
 post. Negative results stay in the table.
 
-> **Status: 100% of the spec, across three machines.** The ladder
-> now has **zero skipped and zero failed rungs** — `+pin_memory`, `+tf32` and
-> `+compile` all ran on an NVIDIA L4. Two results changed: bf16 reversed sign
-> (3.3x slower on CPU, +16% on GPU, still not separable), and the CPU-pinning
-> win **disappeared** on a quiet machine. NCCL scaling now runs on two A40s, and the
-> prediction the study made about what would transfer held.
->
-> **Original status: ~100% of what this machine can host.** Instrumentation, the ladder,
-> repeats-and-report, committed profiler traces, **weak and strong DDP scaling
-> studies executed across real processes**, an **ablation that refuted its own
-> hypothesis**, a **cost-to-target-accuracy study**, and a **CPU-pinning
-> experiment that had to validate its own instrument first** are done — all on
-> **CPU**, labelled as such everywhere. No GPU exists here, so there is no GPU
-> number anywhere, and `torch.compile` genuinely fails on this box. See
-> [Roadmap](#roadmap).
+**[See the measured results](https://riya0920.github.io/profiling-training-study/)**
 
-## DDP scaling, actually executed — weak and strong
+
+## DDP scaling, actually executed - weak and strong
 
 No GPU here, so the study runs DDP over **gloo** across real OS processes on CPU.
 Genuinely distributed; labelled CPU/gloo rather than dressed up as a GPU result.
 
-**Weak scaling** (per-worker batch fixed — "more data in the same time"):
+**Weak scaling** (per-worker batch fixed - "more data in the same time"):
 
 | world | global batch | lr | samples/s (mean ± std) | speedup | efficiency |
 |---|---|---|---|---|---|
@@ -33,7 +22,7 @@ Genuinely distributed; labelled CPU/gloo rather than dressed up as a GPU result.
 | 2 | 64 | 0.0200 | 69.8 ± 1.7 | 1.60x | **80%** |
 | 4 | 128 | 0.0400 | 103.7 ± 13.9 | 2.38x | **59%** |
 
-**Strong scaling** (global batch fixed — "the same job, faster"):
+**Strong scaling** (global batch fixed - "the same job, faster"):
 
 | world | per-worker batch | lr | samples/s (mean ± std) | speedup | efficiency |
 |---|---|---|---|---|---|
@@ -47,7 +36,7 @@ amortised over less work.
 
 ### A bug the strong-scaling run exposed
 
-The LR was scaling against the **per-worker** batch — right by accident under
+The LR was scaling against the **per-worker** batch - right by accident under
 weak scaling, where they coincide. Under strong scaling it printed
 `lr 0.01 → 0.02 → 0.04` while the global batch never moved from 128. That is a
 hyperparameter change wearing a scaling study's clothes. Fixed to reference a
@@ -73,7 +62,7 @@ reported *with* its spread so a reader can see it is unusable.
 ### The ablation refuted the fallback hypothesis too
 
 With communication unmeasurable, the remaining explanation was CPU contention
-from the in-process decode. The ablation is one command — rerun world 4 with
+from the in-process decode. The ablation is one command - rerun world 4 with
 `--decode-cost 0`:
 
 | configuration | efficiency at world 4 |
@@ -84,7 +73,7 @@ from the in-process decode. The ablation is one command — rerun world 4 with
 Removing *all* CPU-side data work recovers ~6 points, and the two overlap within
 the baseline's spread. **Decode contention is not the dominant term either.**
 
-Both candidate explanations have been tested and neither accounts for the ~35–41%
+Both candidate explanations have been tested and neither accounts for the ~35-41%
 loss. What remains untested is core oversubscription (4 workers plus gloo threads
 on 4 physical cores) and DDP's gradient-bucketing overhead.
 
@@ -135,7 +124,7 @@ make report                                # regenerate REPORT.md + figures from
 
 On a GPU box the same command runs the CUDA-only rungs (`pin_memory`, `tf32`)
 that are skipped on CPU, and the timer switches from `perf_counter` to
-`torch.cuda.Event` automatically — wall-clock timing around an async kernel
+`torch.cuda.Event` automatically - wall-clock timing around an async kernel
 launch measures how fast Python queued the work, not how long the GPU took.
 
 ## What the profile actually said
@@ -145,7 +134,7 @@ single number set the entire rung order: while the device is idle a third of the
 time waiting for input, precision and layout optimisations cannot help, because
 kernels are not the constraint.
 
-The obvious first move — mixed precision — would have been the wrong one here,
+The obvious first move - mixed precision - would have been the wrong one here,
 and the profile said so before any time was spent on it. That is the whole
 argument for the word order in "profiling-driven distributed training".
 
@@ -172,13 +161,12 @@ this workload. What transfers is the method and the rung order, not the values.
 `amp_dtype` defaults to **bf16**. bf16 keeps fp32's exponent range and loses
 mantissa bits; fp16 keeps mantissa and loses range, which is why fp16 needs a
 `GradScaler` to stop small gradients flushing to zero. The code enables the
-scaler *only* for fp16 (`scaler = GradScaler(enabled=amp and dtype is fp16)`) —
-running a scaler with bf16 is a common cargo-cult that costs a little time and
+scaler *only* for fp16 (`scaler = GradScaler(enabled=amp and dtype is fp16)`) - running a scaler with bf16 is a common cargo-cult that costs a little time and
 buys nothing.
 
 What breaks if this choice is wrong: on hardware without native bf16 (pre-Ampere
 NVIDIA, most CPUs without AMX), bf16 autocast is emulated and is **slower than
-fp32** — which is exactly what the measured ladder on this CPU shows, and why
+fp32** - which is exactly what the measured ladder on this CPU shows, and why
 that rung is a negative result in the table rather than a deleted row.
 
 ## Cost
@@ -192,12 +180,11 @@ prices are not what anyone's bill actually says.
 ## On an actual GPU
 
 Everything above this line is CPU. A rented **NVIDIA L4** (g6.2xlarge spot,
-us-east-1, ~$0.92/hr) ran the same ladder on real hardware for the first time —
-and the three rungs this machine could never execute all ran.
+us-east-1, ~$0.92/hr) ran the same ladder on real hardware for the first time - and the three rungs this machine could never execute all ran.
 
 | rung | samples/s | ± | data-wait | vs prev | separable? |
 |---|---|---|---|---|---|
-| baseline | 789.8 | 0.7 | 95% | — | — |
+| baseline | 789.8 | 0.7 | 95% | - | - |
 | **workers** | **3146.4** | 71.2 | 79% | **+298%** | **yes** |
 | workers+persistent | 3003.6 | 23.7 | 80% | −4.5% | yes |
 | +prefetch | 3072.8 | 20.4 | 79% | +2.3% | yes |
@@ -223,18 +210,17 @@ three of those eight rungs clear their own spread. The cumulative 4.66× is real
 
 That is the finding worth the rental. On CPU the dataloader was one bottleneck
 among several. On the L4 compute got roughly four times faster and the dataloader
-did not, so the GPU is **starved for the entire ladder** — 95% at baseline, still
-79–90% after every kernel-level optimisation.
+did not, so the GPU is **starved for the entire ladder** - 95% at baseline, still
+79-90% after every kernel-level optimisation.
 
 Which is why `+tf32`, `+amp`, `+channels_last` and `+compile` land inside the
 noise: they make the GPU faster at a job it is already waiting to be given. The
-ladder's ordering thesis — profile first, fix the stall, *then* touch kernels —
-holds harder on a GPU than it did on the CPU that motivated it.
+ladder's ordering thesis - profile first, fix the stall, *then* touch kernels - holds harder on a GPU than it did on the CPU that motivated it.
 
 ### The bf16 result flipped sign, and is still not established
 
 On CPU, `+amp` was the ladder's headline negative: **3.3× slower**. On the L4 it
-is **+16%** — the largest single post-`workers` gain.
+is **+16%** - the largest single post-`workers` gain.
 
 It is also not separable. The spread is ±655 samples/s, 18% of the measurement,
 so a +16% move does not clear it. The honest statement is that the *sign*
@@ -244,12 +230,12 @@ repeating the CPU mistake with better hardware.
 
 ### torch.compile ran, and made it slower
 
-−10.6%, with `Not enough SMs to use max_autotune_gemm mode` — the L4 has too few
+−10.6%, with `Not enough SMs to use max_autotune_gemm mode` - the L4 has too few
 SMs for Inductor's autotuning path. Another negative result, and one that could
 not previously be *had*: the row was blocked on a missing compiler, so "does
 compile help here" had never been a question with an answer.
 
-## Cost to a target *accuracy* — the question the ladder cannot answer
+## Cost to a target *accuracy* - the question the ladder cannot answer
 
 Every number in the optimisation ladder is samples per second. That is right for
 *"is the training loop efficient?"* and wrong for the question anyone pays for,
@@ -258,8 +244,7 @@ which is *"what does it cost to get a model this good?"*
     cost to target = samples_to_target / samples_per_second x rate
 
 **Both factors.** The ladder measures only the denominator, so it is structurally
-blind to any change that moves throughput and convergence in opposite directions —
-and so is every "we got a 2x speedup" measured the same way.
+blind to any change that moves throughput and convergence in opposite directions - and so is every "we got a 2x speedup" measured the same way.
 
 `make accuracy` trains each configuration until held-out accuracy crosses 85% on
 two consecutive evaluations, at $0.35/hour:
@@ -273,8 +258,7 @@ two consecutive evaluations, at $0.35/hour:
 | batch128_bf16 | 31.7 | 162.5 | 20,800 | $0.0639 | 5 | 5 |
 
 **The winners agree and the orderings do not.** `batch256_linear` is the
-second-fastest configuration and the second-most-expensive route to the target —
-a throughput ladder promotes it while it costs **3.75x** the cheapest path to the
+second-fastest configuration and the second-most-expensive route to the target - a throughput ladder promotes it while it costs **3.75x** the cheapest path to the
 same accuracy. Across the table the spread is **5.8x**, and none of it is visible
 in samples/s.
 
@@ -289,12 +273,12 @@ The first version compared only `rank_by_throughput[0]` against
 the cheapest here"*. True, and it buried the finding: a ladder does not just pick
 a winner, it **ranks every rung**, and the result lives entirely in the rungs that
 move. The comparison now covers full orderings and names the configuration
-throughput over-rates — the one a ladder would promote and a budget would not.
+throughput over-rates - the one a ladder would promote and a budget would not.
 
 ### Cost to accuracy: the CPU agreed with throughput, the GPU does not
 
-The rented L4 also re-ran the cost-to-accuracy study — at the **actual price
-paid**, $0.9221/hr — and it is the sharpest version of this repo's argument.
+The rented L4 also re-ran the cost-to-accuracy study - at the **actual price
+paid**, $0.9221/hr - and it is the sharpest version of this repo's argument.
 
 Same target (0.85), same step cap, same repeats. Only the device changed.
 
@@ -307,7 +291,7 @@ Same target (0.85), same step cap, same repeats. Only the device changed.
 | batch256_linear | 7303.0 | 5th | 35,200 | $0.001235 | 5th |
 
 `winners_agree: false`. **`batch64` is fourth of five by throughput and first by
-cost** — it moves three places. The dearest configuration costs **3.5x** the
+cost** - it moves three places. The dearest configuration costs **3.5x** the
 cheapest, and none of that spread is visible in samples/s.
 
 On the CPU run, `winners_agree` was **true**: `batch64` was both the fastest and
@@ -316,8 +300,8 @@ nothing to say. The inversion is not a property of the code. It is a property of
 the hardware the code runs on.
 
 The mechanism is visible in the two middle columns. `samples_to_target` is almost
-identical on both devices — 12,000 / 17,600 / 20,800 / 35,200, differing only for
-bf16 — because how many samples an optimiser needs to reach an accuracy is a
+identical on both devices - 12,000 / 17,600 / 20,800 / 35,200, differing only for
+bf16 - because how many samples an optimiser needs to reach an accuracy is a
 property of the optimisation, not of the chip. Throughput is the opposite: it
 reordered completely. Cost is one divided by the other, so on a device where
 throughput happens to agree with sample-efficiency you can measure the wrong
@@ -328,7 +312,7 @@ CPU, it was a lucky one**, and nothing in a samples/s dashboard tells you which
 of the two you are currently enjoying.
 
 bf16 makes it concrete. It is the fastest configuration on the L4 by 36% over
-`batch64` — and 37% more expensive to get to the same accuracy, because it needs
+`batch64` - and 37% more expensive to get to the same accuracy, because it needs
 22,400 samples instead of 12,000. Buying throughput and paying it back in extra
 samples is invisible to every metric except this one.
 
@@ -345,7 +329,7 @@ execution structurally could not:
   `perf_counter()` after `backward()` returns once the work is *queued*, not once
   it is done. Every timing would have measured launch overhead and reported it as
   compute. This is the same shape as trusting Kafka's `flush()` to mean the
-  writes landed — an async boundary read as if it were synchronous — and it is
+  writes landed - an async boundary read as if it were synchronous - and it is
   the kind of bug that makes a benchmark faster and wronger at once.
 
 Both are fixed, and the result above is post-fix. The first bug is embarrassing;
@@ -367,7 +351,7 @@ result**.
 | disjointness effect | +6.1% | +0.5% |
 
 The noise floor fell twelve-fold and the effect vanished with it. On a machine
-that is not fighting anything else, **pinning does nothing measurable** — +0.6%
+that is not fighting anything else, **pinning does nothing measurable** - +0.6%
 against a 1.0% floor.
 
 So the laptop's +41.3%, which cleared its own noise floor by 3.5× and looked like
@@ -384,7 +368,7 @@ be two different answers.
 ## The instrument-validation machinery, unchanged
 
 The ladder's biggest win was `num_workers=4`. On an 8-core box that leaves the
-main process sharing all 8 cores with 4 decode workers — everybody oversubscribed,
+main process sharing all 8 cores with 4 decode workers - everybody oversubscribed,
 threads migrating, caches thrown away. Does partitioning the cores beat sharing
 them, even though partitioning gives each side strictly fewer?
 
@@ -393,15 +377,15 @@ that cannot separate its own interventions has measured neither:
 
 | arm | main | workers | threads | samples/s (median of 7) | range |
 |---|---|---|---|---|---|
-| `default` | all | all | default | 87.8 | 79.2–105.2 |
-| `threads_capped` | all | all | 4 | 99.5 | 65.3–129.0 |
-| `pinned_split` | 0–3 | 4–7 | 4 | **140.6** | 129.4–146.3 |
-| `pinned_half_shared` | 0–3 | 0–3 | 4 | 132.5 | 113.9–138.5 |
+| `default` | all | all | default | 87.8 | 79.2-105.2 |
+| `threads_capped` | all | all | 4 | 99.5 | 65.3-129.0 |
+| `pinned_split` | 0-3 | 4-7 | 4 | **140.6** | 129.4-146.3 |
+| `pinned_half_shared` | 0-3 | 0-3 | 4 | 132.5 | 113.9-138.5 |
 
 **Pinning is worth +41.3%**, an effect 3.5x the measured noise floor.
 
 **The mechanism is not the one predicted.** `pinned_half_shared` puts both sides
-on the *same* four cores — same core count, shared instead of disjoint — and
+on the *same* four cores - same core count, shared instead of disjoint - and
 captures nearly all of the gain. Disjointness is worth a further +6.1%, which is
 *inside* the noise floor and not separable. So what helps is confining the
 training process to four cores **at all**; whether the dataloader gets its own
@@ -410,7 +394,7 @@ is "partitioning removed contention", and this data does not support it.
 
 ### The calibration arm did more work than the experiment
 
-PyTorch already defaults to **4 threads** here — 8 logical cores, 4 physical — so
+PyTorch already defaults to **4 threads** here - 8 logical cores, 4 physical - so
 `threads_capped` is a no-op, and `default` and `threads_capped` are **the same
 configuration measured twice**. That accident is the most useful thing in the
 table, twice over.
@@ -420,17 +404,17 @@ not an effect, it is error: **11.8%** at 7 repeats. Every other number has to
 clear it, and the disjointness result does not.
 
 **It validates the separability test itself.** At **3 repeats** those two
-identical arms came out *non-overlapping* — 48.9–67.0 against 81.9–92.5. So
+identical arms came out *non-overlapping* - 48.9-67.0 against 81.9-92.5. So
 non-overlap did **not** imply a real effect: the test scored a false positive on
 the one chance it was given, and every `separable` flag in that run was unsound.
-Two 3-repeat runs duly disagreed on the **sign** of every effect — disjointness
+Two 3-repeat runs duly disagreed on the **sign** of every effect - disjointness
 was +8.4% and "separable" in one, −15.2% and not in the next.
 
 So the module computes `separability_test_valid` and **refuses to issue a verdict
 when the calibration arms fail their own overlap check**. At 3 repeats it reports
 NO CONCLUSION; at 7 the arms overlap as they must and the verdicts become
 readable. The precondition is checkable *before* the result is read, which is the
-whole point — otherwise the 3-repeat run would have shipped whichever sign it
+whole point - otherwise the 3-repeat run would have shipped whichever sign it
 happened to produce, with a confident range test behind it.
 
 ### Two bugs found by running it
@@ -442,7 +426,7 @@ happened to produce, with a confident range test behind it.
   `PicklingError: Can't pickle local object`. It is a module-level class now.
 * **The dataloader kwargs were unguarded for `num_workers=0`.** Torch raises on
   `prefetch_factor` there rather than ignoring it. The study never runs with zero
-  workers — contention is the whole point — so it only fired under test, which is
+  workers - contention is the whole point - so it only fired under test, which is
   precisely where an unguarded version would have sat unnoticed until someone
   reused the helper.
 
@@ -451,11 +435,11 @@ happened to produce, with a confident range test behind it.
 The scaling study ran on gloo/CPU for its whole life, and the honesty note made a
 specific, falsifiable claim about what would happen on real GPUs:
 
-> The *shape* — efficiency falling as the comm fraction grows — is what
+> The *shape* - efficiency falling as the comm fraction grows - is what
 > transfers; the percentages are not a prediction about NCCL.
 
 Two **NVIDIA A40s** (rented, ~$0.80/hr) make that checkable. Same code, same
-model, same batches — only `--backend nccl` and rank-to-device placement differ.
+model, same batches - only `--backend nccl` and rank-to-device placement differ.
 
 | run | backend | ws=1 | ws=2 | speedup | efficiency | comm fraction |
 |---|---|---|---|---|---|---|
@@ -465,22 +449,22 @@ model, same batches — only `--backend nccl` and rank-to-device placement diffe
 | strong | **nccl/A40** | 2610.8 | 3771.7 | 1.44x | **72%** | **25.1% ±6.3** |
 | no-decode | **nccl/A40** | 4330.5 | 5439.1 | 1.26x | **63%** | 24.8% ±8.8 |
 
-**Both halves of the prediction held.** Throughput did not transfer at all — it is
+**Both halves of the prediction held.** Throughput did not transfer at all - it is
 **51x** higher (43.6 -> 2224.3 samples/s), exactly the "percentages are not a
 prediction" part. And the shape did transfer: efficiency still falls as the comm
 fraction rises, and the run with the *highest* comm fraction is still the one with
 the worst efficiency.
 
 The strong-scaling efficiencies landing at 70% and 72% is a coincidence, not a
-confirmation, and it would be dishonest to present it as one — the weak-scaling
+confirmation, and it would be dishonest to present it as one - the weak-scaling
 pair is 80% vs 69% on the same two backends. The band transferred; the numbers
 inside it did not.
 
 ### The interesting part: communication got four times more expensive
 
-On gloo the comm fraction was 1.2–15.2% with spreads up to **±22 points** — the
+On gloo the comm fraction was 1.2-15.2% with spreads up to **±22 points** - the
 README already called that a coin flip rather than a measurement. On NCCL it is
-**25–29% with spreads of ±6–14**: both substantially larger *and* substantially
+**25-29% with spreads of ±6-14**: both substantially larger *and* substantially
 more measurable.
 
 Nothing about the communication changed. The model is the same, so the gradient
@@ -495,13 +479,13 @@ and it only becomes visible when the compute side stops being the bottleneck.
 
 `nvidia-smi topo -m` reports **`SYS`** between GPU0 and GPU1, and
 `nvidia-smi nvlink -s` reports all links inactive. These A40s talk over PCIe
-through the CPU root complex, **and across NUMA nodes** — GPU0 is on NUMA 0,
+through the CPU root complex, **and across NUMA nodes** - GPU0 is on NUMA 0,
 GPU1 on NUMA 1.
 
-So this is close to the worst-case GPU interconnect, and the 25–29% comm fraction
+So this is close to the worst-case GPU interconnect, and the 25-29% comm fraction
 should be read as an **upper bound**. On NVLink the same experiment would show a
 markedly smaller number. The original honesty note said these figures were "not
-GPUs across NVLink" — that is *still* true. What changed is that the backend is
+GPUs across NVLink" - that is *still* true. What changed is that the backend is
 now NCCL rather than gloo; the interconnect is still not NVLink, and the note has
 been updated to say which of the two limitations was retired and which was not.
 
@@ -513,7 +497,7 @@ same way at 4 is untested here.
 
 The backend is now a flag rather than an assumption, which meant touching the code
 path every existing gloo number came from. Re-running gloo after the change gives
-**92% efficiency at ws=2 with 2.3% comm** on the 96-core box — consistent with the
+**92% efficiency at ws=2 with 2.3% comm** on the 96-core box - consistent with the
 CPU curve, so the refactor did not quietly invalidate the results it was extending.
 
 The same `torch.cuda.synchronize()` bug from the cost study applies here and is
@@ -521,31 +505,13 @@ handled: without it the all-reduce would appear free, because it would not have
 happened yet when `perf_counter()` was read.
 
 
-## Roadmap
+## Known limitations
 
-| Milestone | Status |
+Things this repository does not prove, and what each one would need.
+
+| limitation | why |
 |---|---|
-| Instrumented baseline, phase breakdown, unattributed time | done |
-| Optimisation ladder, one change per rung, enforced | done |
-| Repeats with mean±std + separability analysis | done |
-| Generated REPORT.md with generated figures | done |
-| Negative + skipped + failed rungs kept in the ledger | done |
-| Cost ledger and scaling break-even calculator | done |
-| DDP weak-scaling executed at 1/2/4 workers (CPU/gloo) | done |
-| Measured comm fraction explaining the efficiency gap | done |
-| Committed profiler traces, before/after data-wait | done |
-| `docs/SCALING.md` incl. "when is DDP the wrong tool" | done |
-| The full ladder on a real GPU (NVIDIA L4, rented spot) | done |
-| DDP strong/weak scaling on **2x A40 over NCCL**, with a gloo regression | done |
 | **NCCL over NVLink, and world size 4** | not available: the rented pair is PCIe/`SYS` across NUMA, and it is two GPUs |
-| Contention-vs-communication ablation, executed | done |
-| Strong-scaling counterpart (global batch fixed) | done |
-| Comm fraction repeated and reported with its spread | done |
-| `torch.compile` rung, executed on Linux+gcc -- **-10.6%, a negative result** | done |
-| Cost-to-target-accuracy: throughput and cost rank the rungs differently | done |
-| CPU-pinning experiment, with a calibration arm that validates its own test | done |
-| Pinning re-run on a dedicated box: noise floor 11.8% -> 1.0%, effect vanished | done |
-| Cost-to-accuracy on the L4: throughput and cost disagree, `batch64` moves 4th -> 1st | done |
 
 ## Honesty notes
 
@@ -565,7 +531,7 @@ happened yet when `perf_counter()` was read.
   (100% / 69%) are two A40s over **PCIe across NUMA nodes**, which
   `nvidia-smi topo -m` reports as `SYS`. The prediction that the shape would
   transfer and the percentages would not was tested and held. The comm fractions
-  are an upper bound — NVLink would be lower — and world size 4 is untested on
+  are an upper bound - NVLink would be lower - and world size 4 is untested on
   NCCL.
   (An earlier version of this note said there was no scaling number at all. That
   was true when it was written and stopped being true when the study ran, and a
@@ -584,10 +550,10 @@ happened yet when `perf_counter()` was read.
   on the effect being 3.5x the noise floor, not on that hair-width range test.
 * **The cost-to-accuracy task is synthetic**, so its convergence shape belongs to
   the generator. What transfers is that the two rankings can disagree and that
-  only measuring both catches it — not the crossover point.
+  only measuring both catches it - not the crossover point.
 * **Stopping resolution differs across batch sizes.** Accuracy is evaluated every
   25 steps, so `samples_to_target` is quantised to 1,600 samples at batch 64 and
-  6,400 at batch 256 — up to 18% of that row. It does not explain a 2.9x gap, and
+  6,400 at batch 256 - up to 18% of that row. It does not explain a 2.9x gap, and
   it is a real bias in the large-batch direction.
 * Absolute throughput is meaningless outside this synthetic workload. The rung
   *order* is the transferable result; the rung *values* are not.

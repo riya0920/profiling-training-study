@@ -1,7 +1,7 @@
 """Tests for the cost-to-accuracy study and the CPU-pinning experiment.
 
 Both modules run real training, so these tests use tiny configurations and check
-the *machinery* — the stopping rule, the cost arithmetic, the arm design — rather
+the *machinery* - the stopping rule, the cost arithmetic, the arm design - rather
 than re-running the studies. The studies themselves are committed under
 `results/`.
 
@@ -105,7 +105,7 @@ def test_the_study_refuses_to_run_rather_than_collapse_its_arms(monkeypatch):
 
 def test_the_stopping_rule_requires_two_consecutive_crossings():
     """The whole table is *when* the target was crossed, so a noisy stopping rule
-    does not add error to the answer — it becomes the answer.
+    does not add error to the answer - it becomes the answer.
 
     Driven with a scripted accuracy sequence rather than real training, because
     the property under test is the rule, not the model.

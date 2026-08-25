@@ -1,4 +1,4 @@
-"""Cost to a target ACCURACY — the question the throughput ladder cannot answer.
+"""Cost to a target ACCURACY - the question the throughput ladder cannot answer.
 
     python -m trainlab.accuracy --target 0.85 --rate 0.35
 
@@ -10,7 +10,7 @@ for the question anyone actually pays for, which is *"what does it cost to get a
 model this good?"*
 
 The two come apart for one reason: **a change can move throughput and convergence
-in opposite directions.** Batch size is the obvious case — doubling it usually
+in opposite directions.** Batch size is the obvious case - doubling it usually
 raises samples/s and often raises the number of samples needed to reach a target,
 because a doubled batch does not halve the number of updates required. The ladder
 sees the first effect and is structurally blind to the second, and so is every
@@ -26,8 +26,8 @@ worse, and the only way to know is to measure the numerator too.
 Each configuration trains from the same seed until held-out accuracy first
 crosses the target, and reports:
 
-  * **samples_to_target** — the convergence term the ladder never sees
-  * **samples_per_s** — the throughput term, measured on the same run
+  * **samples_to_target** - the convergence term the ladder never sees
+  * **samples_per_s** - the throughput term, measured on the same run
   * **hours** and **usd** to the target, at a rate the caller supplies
 
 Then it ranks the configurations by throughput and by cost-to-target separately.
@@ -37,7 +37,7 @@ Then it ranks the configurations by throughput and by cost-to-target separately.
 
 * The task is synthetic, so the *shape* of its convergence is a property of this
   generator. What transfers is the method and the fact that the two rankings can
-  disagree — not the specific crossover.
+  disagree - not the specific crossover.
 * Held-out accuracy is a **noisy stopping rule**. One lucky evaluation can trip
   the threshold early, so the crossing requires the target to be met on two
   consecutive evaluations. Without that, the whole table measures evaluation
@@ -111,7 +111,7 @@ def train_to_target(cfg: AccConfig, target: float, device, train_n: int = 4000,
 
     Twice in a row, not once. Held-out accuracy on 1,000 samples has a standard
     error near a percentage point, so a single crossing of an 85% threshold is
-    substantially a coin flip — and since the whole table is *when* the crossing
+    substantially a coin flip - and since the whole table is *when* the crossing
     happened, a noisy rule does not add error to the answer, it becomes the
     answer.
 

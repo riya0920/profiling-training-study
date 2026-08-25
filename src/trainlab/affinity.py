@@ -8,25 +8,24 @@ overlap check and the module refuses to conclude -- see the calibration section.
 ## The hypothesis
 
 The ladder's biggest win came from `num_workers=4`, which fixed a data-wait
-stall. But on an 8-core machine that leaves the main process — which runs the
+stall. But on an 8-core machine that leaves the main process - which runs the
 forward and backward passes across however many threads PyTorch chose, by default
-one per core — sharing all 8 cores with 4 decode workers. Everybody is
+one per core - sharing all 8 cores with 4 decode workers. Everybody is
 oversubscribed, the OS scheduler migrates threads between cores, and every
 migration throws away a warm L1 and L2.
 
 If that is happening, **partitioning the cores should beat sharing them** even
 though partitioning gives each side strictly fewer cores. That is the
 counter-intuitive claim worth testing, and it needs four arms because
-`pinned_split` bundles *two* interventions — a thread cap and an affinity mask —
-and an experiment that cannot separate its own interventions has not measured
+`pinned_split` bundles *two* interventions - a thread cap and an affinity mask - and an experiment that cannot separate its own interventions has not measured
 either of them:
 
 | arm | main process | workers | torch threads | what it isolates |
 |---|---|---|---|---|
 | `default` | all cores | all cores | default (= core count) | the baseline |
 | `threads_capped` | all cores | all cores | 4 | **the thread cap alone.** The control for `pinned_split`. |
-| `pinned_split` | cores 0–3 | cores 4–7 | 4 | cap + disjoint partitioning |
-| `pinned_half_shared` | cores 0–3 | cores 0–3 | 4 | cap + *half the machine*, shared |
+| `pinned_split` | cores 0-3 | cores 4-7 | 4 | cap + disjoint partitioning |
+| `pinned_half_shared` | cores 0-3 | cores 0-3 | 4 | cap + *half the machine*, shared |
 
 The fourth arm is the one that stops a wrong conclusion. If `pinned_split` beats
 `threads_capped`, the obvious reading is "partitioning helped". But `pinned_split`
@@ -36,7 +35,7 @@ effect is about core *count*, not about disjointness, and the partitioning story
 is wrong.
 
 (The first version of this file had a fourth arm called `pinned_overlap` that was
-byte-identical to `threads_capped` — same thread cap, no pinning — and was
+byte-identical to `threads_capped` - same thread cap, no pinning - and was
 described as the control. It was a duplicate, and it would have produced a
 confident "pinning has no effect against its control" that was really just the
 same arm compared with itself.)
@@ -55,17 +54,17 @@ At **7 repeats**, on a quiet machine:
 
 | arm | samples/s (median) | range |
 |---|---|---|
-| `default` | 87.8 | 79.2–105.2 |
-| `threads_capped` | 99.5 | 65.3–129.0 |
-| `pinned_split` | **140.6** | 129.4–146.3 |
-| `pinned_half_shared` | 132.5 | 113.9–138.5 |
+| `default` | 87.8 | 79.2-105.2 |
+| `threads_capped` | 99.5 | 65.3-129.0 |
+| `pinned_split` | **140.6** | 129.4-146.3 |
+| `pinned_half_shared` | 132.5 | 113.9-138.5 |
 
-**Pinning is worth +41.3%** against its control — an effect 3.5x the measured
+**Pinning is worth +41.3%** against its control - an effect 3.5x the measured
 noise floor. That is the hypothesis supported.
 
 **The mechanism is not the one the hypothesis named.** `pinned_half_shared` puts
-*both* the main process and the decode workers on the same four cores — same core
-count as `pinned_split`, shared instead of disjoint — and it captures nearly all
+*both* the main process and the decode workers on the same four cores - same core
+count as `pinned_split`, shared instead of disjoint - and it captures nearly all
 of the gain. Disjointness is worth a further +6.1%, which is *inside* the noise
 floor and not separable. So what helps is **confining the training process to
 four cores at all**; whether the dataloader gets its own four is not established
@@ -73,12 +72,12 @@ by this data.
 
 That distinction is the entire reason the fourth arm exists. Without it the
 obvious reading of "+41.3%" is "partitioning removed contention", and this run
-does not support that claim — it supports the much narrower one that a process
+does not support that claim - it supports the much narrower one that a process
 spread across 8 logical (4 physical) cores does worse than one confined to 4.
 
 ## The calibration arm, which did more work than the experiment
 
-PyTorch already defaults to **4 threads** here — 8 logical cores, 4 physical — so
+PyTorch already defaults to **4 threads** here - 8 logical cores, 4 physical - so
 `threads_capped` is a no-op, and `default` and `threads_capped` are *the same
 configuration measured twice*. That accident is the most useful thing in the
 table:
@@ -88,7 +87,7 @@ not an effect, it is error. 11.8% at 7 repeats. Every other number has to clear
 it, and the disjointness result does not.
 
 **It validates the separability test.** At **3 repeats** those two identical arms
-came out *non-overlapping* — 48.9–67.0 against 81.9–92.5. Non-overlap therefore
+came out *non-overlapping* - 48.9-67.0 against 81.9-92.5. Non-overlap therefore
 did not imply a real effect: the test scored a false positive on the one chance
 it was given, and every `separable` flag in that run was unsound. Two 3-repeat
 runs duly disagreed on the **sign** of every effect: disjointness was +8.4% and
@@ -97,12 +96,12 @@ runs duly disagreed on the **sign** of every effect: disjointness was +8.4% and
 So `separability_test_valid` is computed and checked before any verdict is read,
 and at 3 repeats the module refuses to conclude. At 7 the calibration arms
 overlap as they must, and the verdicts become readable. **The precondition is
-checkable in advance**, which is the point of having built it — otherwise the
+checkable in advance**, which is the point of having built it - otherwise the
 3-repeat run would have shipped whichever sign it happened to produce.
 
 ## What these numbers are not
 
-Absolute throughput here moved by more than 2x *between sessions* — `pinned_split`
+Absolute throughput here moved by more than 2x *between sessions* - `pinned_split`
 measured 63.8 samples/s during a run when this laptop was carrying unrelated work
 at 100% CPU, and 140.6 on a quiet one. Only within-session comparisons carry any
 weight, which is why every arm is re-run inside each invocation rather than
